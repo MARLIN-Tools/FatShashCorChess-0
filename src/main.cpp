@@ -1,0 +1,382 @@
+#include "bitboard.h"
+#include "evaluator.h"
+#include "hce_evaluator.h"
+#include "movegen.h"
+#include "perft.h"
+#include "position.h"
+#include "search.h"
+#include "zobrist.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cctype>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace {
+
+std::vector<std::string> split_tokens(const std::string& line) {
+    std::istringstream iss(line);
+    std::vector<std::string> out;
+    std::string tok;
+    while (iss >> tok) {
+        out.push_back(tok);
+    }
+    return out;
+}
+
+std::string join_pv(const std::vector<makaira::Move>& pv) {
+    std::string out;
+    for (const makaira::Move move : pv) {
+        if (!out.empty()) {
+            out += ' ';
+        }
+        out += makaira::move_to_uci(move);
+    }
+    return out;
+}
+
+std::uint64_t fun_display_count(std::uint64_t raw) {
+    std::uint64_t knopen = raw;
+    knopen += knopen / 7;
+    return (knopen / 7) * 2199;
+}
+
+void run_perft(makaira::Position& pos, int depth, bool divide) {
+    using clock = std::chrono::steady_clock;
+
+    const auto start = clock::now();
+    std::uint64_t nodes = 0;
+
+    if (divide) {
+        const auto rows = makaira::perft_divide(pos, depth);
+        for (const auto& row : rows) {
+            std::cout << row.first << ": " << row.second << "\n";
+            nodes += row.second;
+        }
+    } else {
+        nodes = makaira::perft(pos, depth);
+    }
+
+    const auto end = clock::now();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    const double seconds = ms > 0 ? static_cast<double>(ms) / 1000.0 : 0.001;
+    const std::uint64_t nps = static_cast<std::uint64_t>(static_cast<double>(nodes) / seconds);
+
+    std::cout << "nodes " << fun_display_count(nodes) << "\n";
+    std::cout << "time_ms " << ms << "\n";
+    std::cout << "nps " << fun_display_count(nps) << "\n";
+}
+
+bool handle_position(makaira::Position& pos, const std::vector<std::string>& tokens) {
+    if (tokens.size() < 2) {
+        return false;
+    }
+
+    std::size_t i = 1;
+    if (tokens[i] == "startpos") {
+        if (!pos.set_startpos()) {
+            return false;
+        }
+        ++i;
+    } else if (tokens[i] == "fen") {
+        ++i;
+        std::string fen;
+        int fields = 0;
+        while (i < tokens.size() && tokens[i] != "moves" && fields < 6) {
+            if (!fen.empty()) {
+                fen += ' ';
+            }
+            fen += tokens[i++];
+            ++fields;
+        }
+        if (!pos.set_from_fen(fen)) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+
+    if (i < tokens.size() && tokens[i] == "moves") {
+        ++i;
+        for (; i < tokens.size(); ++i) {
+            const makaira::Move move = makaira::parse_uci_move(pos, tokens[i]);
+            if (move.is_none() || !pos.make_move(move)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+int parse_int(const std::string& s, int fallback) {
+    try {
+        return std::stoi(s);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+bool parse_bool(const std::string& s) {
+    if (s == "1" || s == "true" || s == "on") {
+        return true;
+    }
+    return false;
+}
+
+makaira::SearchLimits parse_go_limits(const std::vector<std::string>& tokens) {
+    makaira::SearchLimits limits;
+
+    for (std::size_t i = 1; i < tokens.size(); ++i) {
+        const std::string& t = tokens[i];
+
+        auto next_int = [&](int fallback) {
+            if (i + 1 >= tokens.size()) {
+                return fallback;
+            }
+            ++i;
+            return parse_int(tokens[i], fallback);
+        };
+
+        if (t == "depth") {
+            limits.depth = next_int(0);
+        } else if (t == "nodes") {
+            limits.nodes = static_cast<std::uint64_t>(std::max(0, next_int(0)));
+        } else if (t == "movetime") {
+            limits.movetime_ms = next_int(-1);
+        } else if (t == "wtime") {
+            limits.wtime_ms = next_int(-1);
+        } else if (t == "btime") {
+            limits.btime_ms = next_int(-1);
+        } else if (t == "winc") {
+            limits.winc_ms = next_int(0);
+        } else if (t == "binc") {
+            limits.binc_ms = next_int(0);
+        } else if (t == "movestogo") {
+            limits.movestogo = next_int(0);
+        } else if (t == "ponder") {
+            limits.ponder = true;
+        } else if (t == "infinite") {
+            limits.infinite = true;
+        }
+    }
+
+    return limits;
+}
+
+void print_uci_score(int score) {
+    if (std::abs(score) >= makaira::VALUE_MATE - makaira::MAX_PLY) {
+        const int sign = score > 0 ? 1 : -1;
+        const int mate_ply = makaira::VALUE_MATE - std::abs(score);
+        const int mate_moves = (mate_ply + 1) / 2;
+        std::cout << "score mate " << sign * mate_moves;
+        return;
+    }
+
+    std::cout << "score cp " << score;
+}
+
+bool handle_setoption(makaira::Searcher& searcher,
+                      int& move_overhead_ms,
+                      bool& nodes_as_time,
+                      const std::vector<std::string>& tokens) {
+    std::string name;
+    std::string value;
+    bool parsing_name = false;
+    bool parsing_value = false;
+
+    for (std::size_t i = 1; i < tokens.size(); ++i) {
+        if (tokens[i] == "name") {
+            parsing_name = true;
+            parsing_value = false;
+            continue;
+        }
+        if (tokens[i] == "value") {
+            parsing_name = false;
+            parsing_value = true;
+            continue;
+        }
+
+        if (parsing_name) {
+            if (!name.empty()) {
+                name += ' ';
+            }
+            name += tokens[i];
+        } else if (parsing_value) {
+            if (!value.empty()) {
+                value += ' ';
+            }
+            value += tokens[i];
+        }
+    }
+
+    for (char& c : name) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+
+    if (name == "hash") {
+        const int mb = std::clamp(parse_int(value, 32), 1, 65536);
+        searcher.set_hash_size_mb(static_cast<std::size_t>(mb));
+        return true;
+    }
+
+    if (name == "clear hash") {
+        searcher.clear_hash();
+        return true;
+    }
+
+    if (name == "move overhead") {
+        move_overhead_ms = std::clamp(parse_int(value, 30), 0, 10000);
+        return true;
+    }
+
+    if (name == "nodes as time") {
+        for (char& c : value) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        nodes_as_time = parse_bool(value);
+        return true;
+    }
+
+    return false;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    makaira::attacks::init();
+    makaira::init_zobrist();
+
+    makaira::HCEEvaluator evaluator;
+    makaira::Searcher searcher(evaluator);
+    int move_overhead_ms = 30;
+    bool nodes_as_time = false;
+
+    makaira::Position position;
+    if (!position.set_startpos()) {
+        std::cerr << "Failed to set start position\n";
+        return 1;
+    }
+
+    if (argc >= 3 && std::string(argv[1]) == "perft") {
+        const int depth = std::stoi(argv[2]);
+        if (argc >= 4) {
+            std::string fen;
+            for (int i = 3; i < argc; ++i) {
+                if (!fen.empty()) {
+                    fen += ' ';
+                }
+                fen += argv[i];
+            }
+            if (!position.set_from_fen(fen)) {
+                std::cerr << "Invalid FEN\n";
+                return 1;
+            }
+        }
+        run_perft(position, depth, false);
+        return 0;
+    }
+
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line == "uci") {
+            std::cout << "id name Makaira\n";
+            std::cout << "id author MARLIN-Tools\n";
+            std::cout << "option name Hash type spin default 32 min 1 max 65536\n";
+            std::cout << "option name Move Overhead type spin default 30 min 0 max 10000\n";
+            std::cout << "option name Nodes as Time type check default false\n";
+            std::cout << "uciok\n";
+        } else if (line == "isready") {
+            std::cout << "readyok\n";
+        } else if (line == "ucinewgame") {
+            position.set_startpos();
+            searcher.clear_hash();
+        } else if (line.rfind("setoption", 0) == 0) {
+            const auto tokens = split_tokens(line);
+            handle_setoption(searcher, move_overhead_ms, nodes_as_time, tokens);
+        } else if (line.rfind("position", 0) == 0) {
+            const auto tokens = split_tokens(line);
+            if (!handle_position(position, tokens)) {
+                std::cout << "info string invalid position command\n";
+            }
+        } else if (line.rfind("go perft", 0) == 0) {
+            const auto tokens = split_tokens(line);
+            if (tokens.size() >= 3) {
+                const int depth = std::stoi(tokens[2]);
+                run_perft(position, depth, true);
+            }
+        } else if (line.rfind("go", 0) == 0) {
+            const auto tokens = split_tokens(line);
+            auto limits = parse_go_limits(tokens);
+            limits.move_overhead_ms = move_overhead_ms;
+            limits.nodes_as_time = nodes_as_time;
+            if (limits.depth <= 0 && limits.movetime_ms <= 0 && limits.nodes == 0
+                && limits.wtime_ms <= 0 && limits.btime_ms <= 0 && !limits.infinite) {
+                limits.depth = 8;
+            }
+
+            const auto result = searcher.search(position, limits, [](const makaira::SearchIterationInfo& info) {
+                std::cout << "info depth " << info.depth
+                          << " seldepth " << info.seldepth
+                          << " ";
+                print_uci_score(info.score);
+                std::cout << " nodes " << fun_display_count(info.nodes)
+                          << " time " << info.time_ms
+                          << " nps " << fun_display_count(info.nps)
+                          << " string ttHit=" << info.stats.tt_hits << "/" << info.stats.tt_probes
+                          << " qnodes=" << info.stats.qnodes
+                          << " pvsResearch=" << info.stats.pvs_researches
+                          << " betaCuts=" << info.stats.beta_cutoffs
+                          << " scoreDelta=" << info.score_delta
+                          << " aspFails=" << info.aspiration_fails
+                          << " bmChanges=" << info.bestmove_changes
+                          << " rootMoves=" << info.root_legal_moves
+                          << " tOpt=" << info.optimum_time_ms
+                          << " tEff=" << info.effective_optimum_ms
+                          << " tMax=" << info.maximum_time_ms
+                          << " stab=" << info.stability_score
+                          << " cx=" << info.complexity_x100;
+                if (!info.pv.empty()) {
+                    std::cout << " pv " << join_pv(info.pv);
+                }
+                std::cout << "\n";
+            });
+
+            std::cout << "bestmove " << makaira::move_to_uci(result.best_move) << "\n";
+        } else if (line.rfind("perft", 0) == 0) {
+            const auto tokens = split_tokens(line);
+            if (tokens.size() >= 2) {
+                const int depth = std::stoi(tokens[1]);
+                run_perft(position, depth, true);
+            }
+        } else if (line == "eval") {
+            makaira::EvalBreakdown b{};
+            const int score = evaluator.static_eval_trace(position, &b);
+            std::cout << "info string eval score_cp " << score
+                      << " phase " << b.phase
+                      << " mat_psqt_mg " << b.material_psqt.mg
+                      << " mat_psqt_eg " << b.material_psqt.eg
+                      << " pawns_mg " << b.pawns.mg
+                      << " pawns_eg " << b.pawns.eg
+                      << " mobility_mg " << b.mobility.mg
+                      << " mobility_eg " << b.mobility.eg
+                      << " king_mg " << b.king_safety.mg
+                      << " piece_mg " << b.piece_features.mg
+                      << " threats_mg " << b.threats.mg
+                      << " space_mg " << b.space.mg
+                      << " scale " << b.endgame_scale
+                      << "\n";
+        } else if (line == "ponderhit") {
+            // Synchronous search mode: no active ponder thread to promote.
+        } else if (line == "stop") {
+            // Synchronous search mode: stop is consumed for UCI compatibility.
+        } else if (line == "quit") {
+            break;
+        }
+    }
+
+    return 0;
+}
