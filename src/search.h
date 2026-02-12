@@ -31,6 +31,31 @@ struct SearchLimits {
     bool nodes_as_time = false;
 };
 
+struct SearchConfig {
+    bool use_history = true;
+    bool use_cont_history = true;
+    bool use_nmp = true;
+    bool use_lmr = true;
+
+    int history_max = 16384;
+    int history_bonus_scale = 1;
+    int history_malus_divisor = 2;
+    int cont_history_2ply_divisor = 2;
+
+    int nmp_min_depth = 3;
+    int nmp_base_reduction = 3;
+    int nmp_depth_divisor = 6;
+    int nmp_margin_base = 80;
+    int nmp_margin_per_depth = 20;
+    int nmp_non_pawn_min = 700;
+    int nmp_verify_non_pawn_max = 1700;
+    int nmp_verify_min_depth = 8;
+
+    int lmr_min_depth = 3;
+    int lmr_full_depth_moves = 2;
+    int lmr_history_threshold = 4000;
+};
+
 struct SearchStats {
     std::uint64_t nodes = 0;
     std::uint64_t qnodes = 0;
@@ -45,6 +70,15 @@ struct SearchStats {
     std::uint64_t cutoff_good_capture = 0;
     std::uint64_t cutoff_quiet = 0;
     std::uint64_t cutoff_bad_capture = 0;
+    std::uint64_t history_updates = 0;
+    std::uint64_t cont_history_updates = 0;
+    std::uint64_t nmp_attempts = 0;
+    std::uint64_t nmp_cutoffs = 0;
+    std::uint64_t nmp_verifications = 0;
+    std::uint64_t nmp_verification_fails = 0;
+    std::uint64_t lmr_reduced = 0;
+    std::uint64_t lmr_researches = 0;
+    std::uint64_t lmr_fail_high_after_reduce = 0;
 };
 
 struct SearchResult {
@@ -86,6 +120,10 @@ class Searcher {
 
     void set_hash_size_mb(std::size_t mb);
     void clear_hash();
+    void clear_heuristics();
+
+    void set_search_config(const SearchConfig& config) { config_ = config; }
+    const SearchConfig& search_config() const { return config_; }
 
     SearchResult search(Position& pos, const SearchLimits& limits, SearchInfoCallback on_iteration = {});
 
@@ -196,10 +234,30 @@ class Searcher {
 
     static int score_to_tt(int score, int ply);
     static int score_from_tt(int score, int ply);
+    static int move_index(Piece pc, Square to);
 
     bool should_stop_hard();
 
+    int quiet_move_score(const Position& pos, Move move, int ply) const;
+    void update_history_value(int& value, int bonus) const;
+    void update_quiet_history(const Position& pos,
+                              Color side,
+                              Move best_move,
+                              int ply,
+                              int depth,
+                              const std::array<Move, 256>& quiet_tried,
+                              int quiet_count);
+
+    int nmp_reduction(int depth) const;
+    int lmr_reduction(int depth, int move_count, int quiet_score) const;
+
     static void update_pv(PVLine& dst, Move move, const PVLine& child);
+
+    struct SearchStackEntry {
+        int move_index = -1;
+        bool did_null = false;
+        int static_eval = 0;
+    };
 
     const IEvaluator& evaluator_;
     TranspositionTable tt_{};
@@ -218,6 +276,16 @@ class Searcher {
     int rolling_bestmove_changes_ = 0;
     double session_nps_ema_ = 0.0;
     bool use_eval_move_hooks_ = false;
+
+    SearchConfig config_{};
+
+    static constexpr int HISTORY_SIZE = static_cast<int>(COLOR_NB) * static_cast<int>(SQ_NB) * static_cast<int>(SQ_NB);
+    static constexpr int MOVE_INDEX_NB = static_cast<int>(PIECE_NB) * static_cast<int>(SQ_NB);
+    static constexpr int CONT_HISTORY_SIZE = MOVE_INDEX_NB * MOVE_INDEX_NB;
+    std::vector<std::int16_t> history_{};
+    std::vector<std::int16_t> cont_history_{};
+    std::array<SearchStackEntry, MAX_PLY + 4> stack_{};
+    std::vector<int> lmr_table_{};
 };
 
 }  // namespace makaira

@@ -26,6 +26,7 @@ struct StateInfo {
     std::array<int, COLOR_NB> eg_psqt{{0, 0}};
     std::array<int, COLOR_NB> non_pawn_material{{0, 0}};
     int phase = 0;
+    bool is_null = false;
 };
 
 class Position {
@@ -57,6 +58,8 @@ class Position {
 
     bool make_move(Move move);
     void unmake_move();
+    void make_null_move();
+    void unmake_null_move();
 
     bool is_square_attacked(Square sq, Color by) const;
     bool in_check(Color c) const;

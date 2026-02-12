@@ -359,6 +359,7 @@ bool Position::make_move(Move move) {
     st.eg_psqt = eg_psqt_;
     st.non_pawn_material = non_pawn_material_;
     st.phase = phase_;
+    st.is_null = false;
 
     if (ep_square_ != SQ_NONE) {
         key_ ^= Zobrist.en_passant[file_of(ep_square_)];
@@ -452,6 +453,22 @@ void Position::unmake_move() {
 
     const StateInfo& st = history_.back();
 
+    if (st.is_null) {
+        side_to_move_ = ~side_to_move_;
+        castling_rights_ = st.castling_rights;
+        ep_square_ = st.ep_square;
+        halfmove_clock_ = st.halfmove_clock;
+        fullmove_number_ = st.fullmove_number;
+        key_ = st.key;
+        pawn_key_ = st.pawn_key;
+        mg_psqt_ = st.mg_psqt;
+        eg_psqt_ = st.eg_psqt;
+        non_pawn_material_ = st.non_pawn_material;
+        phase_ = st.phase;
+        history_.pop_back();
+        return;
+    }
+
     const Move move = st.move;
     const Square from = move.from();
     const Square to = move.to();
@@ -506,6 +523,61 @@ void Position::unmake_move() {
     non_pawn_material_ = st.non_pawn_material;
     phase_ = st.phase;
 
+    history_.pop_back();
+}
+
+void Position::make_null_move() {
+    history_.emplace_back();
+    StateInfo& st = history_.back();
+    st.key = key_;
+    st.move = Move{};
+    st.moved_piece = NO_PIECE;
+    st.captured_piece = NO_PIECE;
+    st.castling_rights = castling_rights_;
+    st.ep_square = ep_square_;
+    st.halfmove_clock = halfmove_clock_;
+    st.fullmove_number = fullmove_number_;
+    st.pawn_key = pawn_key_;
+    st.mg_psqt = mg_psqt_;
+    st.eg_psqt = eg_psqt_;
+    st.non_pawn_material = non_pawn_material_;
+    st.phase = phase_;
+    st.is_null = true;
+
+    if (ep_square_ != SQ_NONE) {
+        key_ ^= Zobrist.en_passant[file_of(ep_square_)];
+        ep_square_ = SQ_NONE;
+    }
+
+    key_ ^= Zobrist.side;
+    side_to_move_ = ~side_to_move_;
+    ++halfmove_clock_;
+    if (side_to_move_ == WHITE) {
+        ++fullmove_number_;
+    }
+}
+
+void Position::unmake_null_move() {
+    if (history_.empty()) {
+        return;
+    }
+
+    const StateInfo& st = history_.back();
+    if (!st.is_null) {
+        return;
+    }
+
+    side_to_move_ = ~side_to_move_;
+    castling_rights_ = st.castling_rights;
+    ep_square_ = st.ep_square;
+    halfmove_clock_ = st.halfmove_clock;
+    fullmove_number_ = st.fullmove_number;
+    key_ = st.key;
+    pawn_key_ = st.pawn_key;
+    mg_psqt_ = st.mg_psqt;
+    eg_psqt_ = st.eg_psqt;
+    non_pawn_material_ = st.non_pawn_material;
+    phase_ = st.phase;
     history_.pop_back();
 }
 

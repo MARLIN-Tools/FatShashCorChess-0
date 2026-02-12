@@ -180,6 +180,7 @@ void print_uci_score(int score) {
 }
 
 bool handle_setoption(makaira::Searcher& searcher,
+                      makaira::SearchConfig& search_config,
                       int& move_overhead_ms,
                       bool& nodes_as_time,
                       const std::vector<std::string>& tokens) {
@@ -228,6 +229,11 @@ bool handle_setoption(makaira::Searcher& searcher,
         return true;
     }
 
+    if (name == "clear heuristics") {
+        searcher.clear_heuristics();
+        return true;
+    }
+
     if (name == "move overhead") {
         move_overhead_ms = std::clamp(parse_int(value, 30), 0, 10000);
         return true;
@@ -238,6 +244,78 @@ bool handle_setoption(makaira::Searcher& searcher,
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
         nodes_as_time = parse_bool(value);
+        return true;
+    }
+
+    if (name == "use history") {
+        for (char& c : value) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        search_config.use_history = parse_bool(value);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (name == "use continuation history") {
+        for (char& c : value) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        search_config.use_cont_history = parse_bool(value);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (name == "use null move pruning") {
+        for (char& c : value) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        search_config.use_nmp = parse_bool(value);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (name == "use lmr") {
+        for (char& c : value) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        search_config.use_lmr = parse_bool(value);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (name == "history max") {
+        search_config.history_max = std::clamp(parse_int(value, search_config.history_max), 1024, 32767);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (name == "nmp min depth") {
+        search_config.nmp_min_depth = std::clamp(parse_int(value, search_config.nmp_min_depth), 2, 16);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (name == "nmp margin base") {
+        search_config.nmp_margin_base = std::clamp(parse_int(value, search_config.nmp_margin_base), 0, 500);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (name == "nmp margin per depth") {
+        search_config.nmp_margin_per_depth = std::clamp(parse_int(value, search_config.nmp_margin_per_depth), 0, 200);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (name == "lmr min depth") {
+        search_config.lmr_min_depth = std::clamp(parse_int(value, search_config.lmr_min_depth), 2, 16);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (name == "lmr full depth moves") {
+        search_config.lmr_full_depth_moves = std::clamp(parse_int(value, search_config.lmr_full_depth_moves), 0, 16);
+        searcher.set_search_config(search_config);
         return true;
     }
 
@@ -252,6 +330,8 @@ int main(int argc, char** argv) {
 
     makaira::HCEEvaluator evaluator;
     makaira::Searcher searcher(evaluator);
+    makaira::SearchConfig search_config{};
+    searcher.set_search_config(search_config);
     int move_overhead_ms = 30;
     bool nodes_as_time = false;
 
@@ -288,15 +368,27 @@ int main(int argc, char** argv) {
             std::cout << "option name Hash type spin default 32 min 1 max 65536\n";
             std::cout << "option name Move Overhead type spin default 30 min 0 max 10000\n";
             std::cout << "option name Nodes as Time type check default false\n";
+            std::cout << "option name Use History type check default true\n";
+            std::cout << "option name Use Continuation History type check default true\n";
+            std::cout << "option name Use Null Move Pruning type check default true\n";
+            std::cout << "option name Use LMR type check default true\n";
+            std::cout << "option name History Max type spin default 16384 min 1024 max 32767\n";
+            std::cout << "option name NMP Min Depth type spin default 3 min 2 max 16\n";
+            std::cout << "option name NMP Margin Base type spin default 80 min 0 max 500\n";
+            std::cout << "option name NMP Margin Per Depth type spin default 20 min 0 max 200\n";
+            std::cout << "option name LMR Min Depth type spin default 3 min 2 max 16\n";
+            std::cout << "option name LMR Full Depth Moves type spin default 2 min 0 max 16\n";
+            std::cout << "option name Clear Heuristics type button\n";
             std::cout << "uciok\n";
         } else if (line == "isready") {
             std::cout << "readyok\n";
         } else if (line == "ucinewgame") {
             position.set_startpos();
             searcher.clear_hash();
+            searcher.clear_heuristics();
         } else if (line.rfind("setoption", 0) == 0) {
             const auto tokens = split_tokens(line);
-            handle_setoption(searcher, move_overhead_ms, nodes_as_time, tokens);
+            handle_setoption(searcher, search_config, move_overhead_ms, nodes_as_time, tokens);
         } else if (line.rfind("position", 0) == 0) {
             const auto tokens = split_tokens(line);
             if (!handle_position(position, tokens)) {
@@ -331,6 +423,13 @@ int main(int argc, char** argv) {
                           << " mgen=" << info.stats.movegen_calls
                           << " mgMoves=" << info.stats.moves_generated
                           << " pick=" << info.stats.move_pick_iterations
+                          << " histUpd=" << info.stats.history_updates
+                          << " contUpd=" << info.stats.cont_history_updates
+                          << " nmp=" << info.stats.nmp_cutoffs << "/" << info.stats.nmp_attempts
+                          << " nmpVer=" << info.stats.nmp_verifications << ":" << info.stats.nmp_verification_fails
+                          << " lmr=" << info.stats.lmr_reduced
+                          << " lmrRe=" << info.stats.lmr_researches
+                          << " lmrFH=" << info.stats.lmr_fail_high_after_reduce
                           << " pvsResearch=" << info.stats.pvs_researches
                           << " betaCuts=" << info.stats.beta_cutoffs
                           << " scoreDelta=" << info.score_delta
@@ -388,6 +487,13 @@ int main(int argc, char** argv) {
                       << " movegen " << result.stats.movegen_calls
                       << " moves_generated " << result.stats.moves_generated
                       << " pick_iters " << result.stats.move_pick_iterations
+                      << " history_updates " << result.stats.history_updates
+                      << " cont_updates " << result.stats.cont_history_updates
+                      << " nmp " << result.stats.nmp_cutoffs << "/" << result.stats.nmp_attempts
+                      << " nmp_verify " << result.stats.nmp_verifications << ":" << result.stats.nmp_verification_fails
+                      << " lmr " << result.stats.lmr_reduced
+                      << " lmr_re " << result.stats.lmr_researches
+                      << " lmr_fh " << result.stats.lmr_fail_high_after_reduce
                       << " eval_calls " << est.eval_calls
                       << " pawn_hash_hits " << est.pawn_hash_hits
                       << " pawn_hash_misses " << est.pawn_hash_misses

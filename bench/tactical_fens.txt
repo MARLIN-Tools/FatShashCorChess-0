@@ -1,0 +1,14 @@
+# Mate threats / forcing lines
+6k1/5ppp/8/8/8/8/6PP/6KQ w - - 0 1
+7k/6Q1/6K1/8/8/8/8/8 b - - 0 1
+r1bq1rk1/pppp1ppp/2n2n2/4p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 w - - 0 7
+
+# Hanging pieces / tactical defense
+r2q1rk1/pp1n1ppp/2p1pn2/3p4/3P4/2N1PN2/PPQ2PPP/R3KB1R w KQ - 0 10
+r1b2rk1/pp3ppp/2n1pn2/q1bp4/8/2NP1NP1/PPQ1PPBP/R1B2RK1 w - - 2 10
+2rq1rk1/1p2bppp/p1n1pn2/3p4/3P4/2NBPN2/PPQ2PPP/2RR2K1 w - - 0 13
+
+# Quiet defensive resources
+r4rk1/pp1nqppp/2p1pn2/8/3P4/2N1PN2/PPQ2PPP/R3R1K1 w - - 0 14
+2r2rk1/pp1n1ppp/2p1pn2/q2p4/3P4/2N1PN2/PPQ1BPPP/2RR2K1 w - - 1 13
+3r2k1/pp3ppp/1q2pn2/2bp4/3P4/2N1PN2/PPQ2PPP/2R2RK1 w - - 0 16

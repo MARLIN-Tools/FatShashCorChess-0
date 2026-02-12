@@ -64,6 +64,36 @@ int main() {
         std::cout << "[PASS] checkmate detection score " << result.score << "\n";
     }
 
+    {
+        makaira::Position pos;
+        if (!pos.set_startpos()) {
+            std::cerr << "[FAIL] null move startpos setup\n";
+            return 1;
+        }
+
+        const auto key_before = pos.key();
+        const auto pawn_key_before = pos.pawn_key();
+        const auto stm_before = pos.side_to_move();
+        const auto ep_before = pos.ep_square();
+        const auto hm_before = pos.halfmove_clock();
+        const auto fm_before = pos.fullmove_number();
+
+        pos.make_null_move();
+        if (pos.side_to_move() == stm_before) {
+            std::cerr << "[FAIL] null move did not flip side\n";
+            return 1;
+        }
+
+        pos.unmake_null_move();
+        if (pos.key() != key_before || pos.pawn_key() != pawn_key_before || pos.side_to_move() != stm_before
+            || pos.ep_square() != ep_before || pos.halfmove_clock() != hm_before || pos.fullmove_number() != fm_before) {
+            std::cerr << "[FAIL] null move unmake mismatch\n";
+            return 1;
+        }
+
+        std::cout << "[PASS] null move make/unmake\n";
+    }
+
     std::cout << "All search smoke tests passed.\n";
     return 0;
 }

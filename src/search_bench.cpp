@@ -142,6 +142,15 @@ int main(int argc, char** argv) {
         total.cutoff_good_capture += result.stats.cutoff_good_capture;
         total.cutoff_quiet += result.stats.cutoff_quiet;
         total.cutoff_bad_capture += result.stats.cutoff_bad_capture;
+        total.history_updates += result.stats.history_updates;
+        total.cont_history_updates += result.stats.cont_history_updates;
+        total.nmp_attempts += result.stats.nmp_attempts;
+        total.nmp_cutoffs += result.stats.nmp_cutoffs;
+        total.nmp_verifications += result.stats.nmp_verifications;
+        total.nmp_verification_fails += result.stats.nmp_verification_fails;
+        total.lmr_reduced += result.stats.lmr_reduced;
+        total.lmr_researches += result.stats.lmr_researches;
+        total.lmr_fail_high_after_reduce += result.stats.lmr_fail_high_after_reduce;
 
         total_depth += result.depth;
         total_seldepth += result.seldepth;
@@ -181,6 +190,15 @@ int main(int argc, char** argv) {
     std::cout << "cutoff_good_capture " << total.cutoff_good_capture << "\n";
     std::cout << "cutoff_quiet " << total.cutoff_quiet << "\n";
     std::cout << "cutoff_bad_capture " << total.cutoff_bad_capture << "\n";
+    std::cout << "history_updates " << total.history_updates << "\n";
+    std::cout << "cont_history_updates " << total.cont_history_updates << "\n";
+    std::cout << "nmp_attempts " << total.nmp_attempts << "\n";
+    std::cout << "nmp_cutoffs " << total.nmp_cutoffs << "\n";
+    std::cout << "nmp_verifications " << total.nmp_verifications << "\n";
+    std::cout << "nmp_verification_fails " << total.nmp_verification_fails << "\n";
+    std::cout << "lmr_reduced " << total.lmr_reduced << "\n";
+    std::cout << "lmr_researches " << total.lmr_researches << "\n";
+    std::cout << "lmr_fail_high_after_reduce " << total.lmr_fail_high_after_reduce << "\n";
     std::cout << "eval_calls " << est.eval_calls << "\n";
     std::cout << "pawn_hash_hits " << est.pawn_hash_hits << "\n";
     std::cout << "pawn_hash_misses " << est.pawn_hash_misses << "\n";

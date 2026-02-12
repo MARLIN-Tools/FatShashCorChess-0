@@ -2,6 +2,7 @@
 
 #include "movegen.h"
 
+#include <algorithm>
 #include <array>
 #include <utility>
 
@@ -20,9 +21,10 @@ constexpr std::array<int, PIECE_TYPE_NB> PIECE_ORDER_VALUE = {
 
 }  // namespace
 
-MovePicker::MovePicker(const Position& pos, Move tt_move, bool qsearch_only) :
+MovePicker::MovePicker(const Position& pos, Move tt_move, bool qsearch_only, const QuietOrderContext* quiet_ctx) :
     tt_move_(tt_move),
-    qsearch_only_(qsearch_only) {
+    qsearch_only_(qsearch_only),
+    quiet_ctx_(quiet_ctx) {
     MoveList moves;
     generate_pseudo_legal(pos, moves);
     generated_count_ = moves.count;
@@ -49,7 +51,7 @@ MovePicker::MovePicker(const Position& pos, Move tt_move, bool qsearch_only) :
             continue;
         }
 
-        quiets_[quiet_count_++] = ScoredMove{move, 0};
+        quiets_[quiet_count_++] = ScoredMove{move, quiet_score(pos, move, quiet_ctx_)};
     }
 }
 
@@ -128,5 +130,34 @@ int MovePicker::capture_score(const Position& pos, Move move) {
     return captured_value * 16 - attacker_value;
 }
 
-}  // namespace makaira
+int MovePicker::quiet_score(const Position& pos, Move move, const QuietOrderContext* quiet_ctx) {
+    if (!quiet_ctx) {
+        return 0;
+    }
 
+    int score = 0;
+
+    if (quiet_ctx->use_history && quiet_ctx->history) {
+        const int idx = (static_cast<int>(quiet_ctx->side) * SQ_NB + static_cast<int>(move.from())) * SQ_NB
+                        + static_cast<int>(move.to());
+        score += quiet_ctx->history[idx];
+    }
+
+    if (quiet_ctx->use_cont_history && quiet_ctx->cont_history) {
+        const Piece moved = pos.piece_on(move.from());
+        if (moved != NO_PIECE) {
+            const int cur = static_cast<int>(moved) * SQ_NB + static_cast<int>(move.to());
+            if (quiet_ctx->prev1_move_index >= 0) {
+                score += quiet_ctx->cont_history[quiet_ctx->prev1_move_index * MOVE_INDEX_NB + cur];
+            }
+            if (quiet_ctx->prev2_move_index >= 0) {
+                const int d = std::max(1, quiet_ctx->cont_history_2ply_divisor);
+                score += quiet_ctx->cont_history[quiet_ctx->prev2_move_index * MOVE_INDEX_NB + cur] / d;
+            }
+        }
+    }
+
+    return score;
+}
+
+}  // namespace makaira

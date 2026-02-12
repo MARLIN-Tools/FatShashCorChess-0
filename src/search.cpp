@@ -4,6 +4,7 @@
 #include "movegen.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace makaira {
@@ -20,6 +21,23 @@ constexpr int MATE_SCORE_FOR_TT = VALUE_MATE - MAX_PLY;
 Searcher::Searcher(const IEvaluator& evaluator) :
     evaluator_(evaluator) {
     tt_.resize_mb(32);
+    history_.assign(HISTORY_SIZE, 0);
+    cont_history_.assign(CONT_HISTORY_SIZE, 0);
+    lmr_table_.assign((MAX_PLY + 1) * 256, 0);
+    clear_heuristics();
+
+    for (int d = 0; d <= MAX_PLY; ++d) {
+        for (int m = 0; m < 256; ++m) {
+            if (d < 2 || m < 2) {
+                lmr_table_[d * 256 + m] = 0;
+                continue;
+            }
+
+            const double rd = std::log(static_cast<double>(d));
+            const double rm = std::log(static_cast<double>(m));
+            lmr_table_[d * 256 + m] = std::max(1, static_cast<int>(std::floor((rd * rm) / 2.0)));
+        }
+    }
 }
 
 void Searcher::set_hash_size_mb(std::size_t mb) {
@@ -28,6 +46,11 @@ void Searcher::set_hash_size_mb(std::size_t mb) {
 
 void Searcher::clear_hash() {
     tt_.clear();
+}
+
+void Searcher::clear_heuristics() {
+    std::fill(history_.begin(), history_.end(), std::int16_t{0});
+    std::fill(cont_history_.begin(), cont_history_.end(), std::int16_t{0});
 }
 
 void Searcher::TranspositionTable::resize_mb(std::size_t mb) {
@@ -99,6 +122,127 @@ int Searcher::score_from_tt(int score, int ply) {
         return score + ply;
     }
     return score;
+}
+
+int Searcher::move_index(Piece pc, Square to) {
+    if (pc == NO_PIECE || !is_ok_square(to)) {
+        return -1;
+    }
+    return static_cast<int>(pc) * SQ_NB + static_cast<int>(to);
+}
+
+int Searcher::quiet_move_score(const Position& pos, Move move, int ply) const {
+    if (!config_.use_history && !config_.use_cont_history) {
+        return 0;
+    }
+
+    int score = 0;
+    if (config_.use_history) {
+        const int idx =
+          (static_cast<int>(pos.side_to_move()) * SQ_NB + static_cast<int>(move.from())) * SQ_NB + static_cast<int>(move.to());
+        score += history_[idx];
+    }
+
+    if (config_.use_cont_history) {
+        const int cur = move_index(pos.piece_on(move.from()), move.to());
+        if (cur >= 0) {
+            const int prev1 = stack_[ply].move_index;
+            const int prev2 = ply > 0 ? stack_[ply - 1].move_index : -1;
+            if (prev1 >= 0) {
+                score += cont_history_[prev1 * MOVE_INDEX_NB + cur];
+            }
+            if (prev2 >= 0) {
+                score += cont_history_[prev2 * MOVE_INDEX_NB + cur] / std::max(1, config_.cont_history_2ply_divisor);
+            }
+        }
+    }
+
+    return score;
+}
+
+void Searcher::update_history_value(int& value, int bonus) const {
+    const int max_h = std::max(1, config_.history_max);
+    int next = value + bonus - (value * std::abs(bonus)) / max_h;
+    next = std::clamp(next, -max_h, max_h);
+    value = next;
+}
+
+void Searcher::update_quiet_history(const Position& pos,
+                                    Color side,
+                                    Move best_move,
+                                    int ply,
+                                    int depth,
+                                    const std::array<Move, 256>& quiet_tried,
+                                    int quiet_count) {
+    if (!config_.use_history && !config_.use_cont_history) {
+        return;
+    }
+
+    const int bonus = std::max(1, depth * depth * std::max(1, config_.history_bonus_scale));
+    const int malus = std::max(1, bonus / std::max(1, config_.history_malus_divisor));
+
+    auto update_quiet = [&](Move m, int delta) {
+        if (m.is_none() || m.is_capture() || m.is_promotion()) {
+            return;
+        }
+
+        if (config_.use_history) {
+            const int idx =
+              (static_cast<int>(side) * SQ_NB + static_cast<int>(m.from())) * SQ_NB + static_cast<int>(m.to());
+            int v = history_[idx];
+            update_history_value(v, delta);
+            history_[idx] = static_cast<std::int16_t>(v);
+            ++stats_.history_updates;
+        }
+
+        if (config_.use_cont_history) {
+            const int cur = move_index(pos.piece_on(m.from()), m.to());
+            if (cur >= 0) {
+                const int prev1 = stack_[ply].move_index;
+                const int prev2 = ply > 0 ? stack_[ply - 1].move_index : -1;
+                if (prev1 >= 0) {
+                    const int idx = prev1 * MOVE_INDEX_NB + cur;
+                    int v = cont_history_[idx];
+                    update_history_value(v, delta);
+                    cont_history_[idx] = static_cast<std::int16_t>(v);
+                    ++stats_.cont_history_updates;
+                }
+                if (prev2 >= 0) {
+                    const int idx = prev2 * MOVE_INDEX_NB + cur;
+                    int v = cont_history_[idx];
+                    update_history_value(v, delta / std::max(1, config_.cont_history_2ply_divisor));
+                    cont_history_[idx] = static_cast<std::int16_t>(v);
+                    ++stats_.cont_history_updates;
+                }
+            }
+        }
+    };
+
+    update_quiet(best_move, bonus);
+    for (int i = 0; i < quiet_count; ++i) {
+        if (quiet_tried[i] == best_move) {
+            continue;
+        }
+        update_quiet(quiet_tried[i], -malus);
+    }
+}
+
+int Searcher::nmp_reduction(int depth) const {
+    return std::clamp(config_.nmp_base_reduction + depth / std::max(1, config_.nmp_depth_divisor), 1, depth - 1);
+}
+
+int Searcher::lmr_reduction(int depth, int move_count, int quiet_score) const {
+    if (depth <= 1) {
+        return 0;
+    }
+
+    const int d = std::min(depth, MAX_PLY);
+    const int m = std::min(move_count, 255);
+    int r = lmr_table_[d * 256 + m];
+    if (quiet_score >= config_.lmr_history_threshold) {
+        --r;
+    }
+    return std::clamp(r, 0, depth - 1);
 }
 
 int Searcher::TimeManager::clamp_ms(int v) {
@@ -346,6 +490,11 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
 
     tm_.init(limits_, pos.side_to_move(), session_nps_ema_);
     use_eval_move_hooks_ = evaluator_.requires_move_hooks();
+    for (auto& s : stack_) {
+        s = SearchStackEntry{};
+    }
+    stack_[0].move_index = -1;
+    stack_[0].did_null = false;
 
     SearchResult result{};
     result.best_move = Move{};
@@ -541,14 +690,75 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
     }
 
     const bool in_check = pos.in_check(pos.side_to_move());
+    const Color us = pos.side_to_move();
+
+    int static_eval = tt_eval != std::numeric_limits<int>::min() ? tt_eval : evaluator_.static_eval(pos);
+    stack_[ply].static_eval = static_eval;
+
+    if (config_.use_nmp
+        && depth >= config_.nmp_min_depth
+        && !is_pv
+        && !in_check
+        && !stack_[ply].did_null
+        && std::abs(beta) < MATE_SCORE_FOR_TT
+        && pos.non_pawn_material(us) >= config_.nmp_non_pawn_min
+        && static_eval >= beta - (config_.nmp_margin_base + config_.nmp_margin_per_depth * depth)) {
+        ++stats_.nmp_attempts;
+
+        const int r = nmp_reduction(depth);
+        pos.make_null_move();
+        stack_[ply + 1].move_index = -1;
+        stack_[ply + 1].did_null = true;
+        stack_[ply + 1].static_eval = 0;
+
+        PVLine null_pv{};
+        const int null_score = -search_node(pos, depth - 1 - r, -beta, -beta + 1, ply + 1, false, null_pv);
+
+        pos.unmake_null_move();
+        stack_[ply + 1] = SearchStackEntry{};
+
+        if (stop_) {
+            return 0;
+        }
+
+        if (null_score >= beta) {
+            const bool verify =
+              depth >= config_.nmp_verify_min_depth || pos.non_pawn_material(us) <= config_.nmp_verify_non_pawn_max;
+            if (verify) {
+                ++stats_.nmp_verifications;
+                PVLine verify_pv{};
+                const int verify_score = search_node(pos, depth - 1 - r, beta - 1, beta, ply, false, verify_pv);
+                if (verify_score >= beta) {
+                    ++stats_.nmp_cutoffs;
+                    return verify_score;
+                }
+                ++stats_.nmp_verification_fails;
+            } else {
+                ++stats_.nmp_cutoffs;
+                return null_score;
+            }
+        }
+    }
+
+    QuietOrderContext quiet_ctx{};
+    quiet_ctx.history = history_.data();
+    quiet_ctx.cont_history = cont_history_.data();
+    quiet_ctx.use_history = config_.use_history;
+    quiet_ctx.use_cont_history = config_.use_cont_history;
+    quiet_ctx.side = us;
+    quiet_ctx.prev1_move_index = stack_[ply].move_index;
+    quiet_ctx.prev2_move_index = ply > 0 ? stack_[ply - 1].move_index : -1;
+    quiet_ctx.cont_history_2ply_divisor = config_.cont_history_2ply_divisor;
 
     ++stats_.movegen_calls;
-    MovePicker picker(pos, tt_move, false);
+    MovePicker picker(pos, tt_move, false, &quiet_ctx);
     stats_.moves_generated += static_cast<std::uint64_t>(picker.generated_count());
 
     int legal_moves = 0;
     int best_score = -VALUE_INFINITE;
     Move best_move{};
+    std::array<Move, 256> quiet_tried{};
+    int quiet_count = 0;
 
     while (true) {
         MovePickPhase phase = MovePickPhase::END;
@@ -558,6 +768,10 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
         }
 
         ++stats_.move_pick_iterations;
+        const bool is_quiet = !move.is_capture() && !move.is_promotion();
+        const int quiet_score = is_quiet ? quiet_move_score(pos, move, ply) : 0;
+        const int move_idx = move_index(pos.piece_on(move.from()), move.to());
+
         if (!pos.make_move(move)) {
             continue;
         }
@@ -567,21 +781,58 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
         }
 
         ++legal_moves;
+        if (is_quiet && quiet_count < static_cast<int>(quiet_tried.size())) {
+            quiet_tried[quiet_count++] = move;
+        }
+
+        stack_[ply + 1].move_index = move_idx;
+        stack_[ply + 1].did_null = false;
+        stack_[ply + 1].static_eval = 0;
 
         PVLine child_pv{};
-        int score;
+        int score = 0;
+
+        const int next_depth = depth - 1;
+        const bool gives_check = pos.in_check(pos.side_to_move());
 
         if (legal_moves == 1) {
-            score = -search_node(pos, depth - 1, -beta, -alpha, ply + 1, is_pv, child_pv);
+            score = -search_node(pos, next_depth, -beta, -alpha, ply + 1, is_pv, child_pv);
         } else {
-            score = -search_node(pos, depth - 1, -alpha - 1, -alpha, ply + 1, false, child_pv);
+            bool reduced = false;
+            if (config_.use_lmr
+                && depth >= config_.lmr_min_depth
+                && !is_pv
+                && !in_check
+                && is_quiet
+                && move != tt_move
+                && legal_moves > config_.lmr_full_depth_moves
+                && !gives_check) {
+                const int red = lmr_reduction(depth, legal_moves, quiet_score);
+                if (red > 0) {
+                    reduced = true;
+                    ++stats_.lmr_reduced;
+                    score = -search_node(pos, next_depth - red, -alpha - 1, -alpha, ply + 1, false, child_pv);
+
+                    if (score > alpha) {
+                        ++stats_.lmr_fail_high_after_reduce;
+                        ++stats_.lmr_researches;
+                        score = -search_node(pos, next_depth, -alpha - 1, -alpha, ply + 1, false, child_pv);
+                    }
+                }
+            }
+
+            if (!reduced) {
+                score = -search_node(pos, next_depth, -alpha - 1, -alpha, ply + 1, false, child_pv);
+            }
+
             if (score > alpha && score < beta) {
                 ++stats_.pvs_researches;
-                score = -search_node(pos, depth - 1, -beta, -alpha, ply + 1, is_pv, child_pv);
+                score = -search_node(pos, next_depth, -beta, -alpha, ply + 1, is_pv, child_pv);
             }
         }
 
         pos.unmake_move();
+        stack_[ply + 1] = SearchStackEntry{};
         if (use_eval_move_hooks_) {
             evaluator_.on_unmake_move(pos, move);
         }
@@ -609,6 +860,10 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
                 case MovePickPhase::BAD_CAPTURE: ++stats_.cutoff_bad_capture; break;
                 case MovePickPhase::END: break;
             }
+
+            if (is_quiet) {
+                update_quiet_history(pos, us, move, ply, depth, quiet_tried, quiet_count);
+            }
             break;
         }
     }
@@ -631,8 +886,7 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
         bound = BOUND_EXACT;
     }
 
-    const int eval = tt_eval != std::numeric_limits<int>::min() ? tt_eval : evaluator_.static_eval(pos);
-    tt_.store(key, best_move, best_score, eval, depth, bound, generation_, ply);
+    tt_.store(key, best_move, best_score, static_eval, depth, bound, generation_, ply);
 
     return best_score;
 }
