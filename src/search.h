@@ -38,6 +38,13 @@ struct SearchStats {
     std::uint64_t tt_hits = 0;
     std::uint64_t beta_cutoffs = 0;
     std::uint64_t pvs_researches = 0;
+    std::uint64_t movegen_calls = 0;
+    std::uint64_t moves_generated = 0;
+    std::uint64_t move_pick_iterations = 0;
+    std::uint64_t cutoff_tt = 0;
+    std::uint64_t cutoff_good_capture = 0;
+    std::uint64_t cutoff_quiet = 0;
+    std::uint64_t cutoff_bad_capture = 0;
 };
 
 struct SearchResult {
@@ -192,7 +199,6 @@ class Searcher {
 
     bool should_stop_hard();
 
-    int score_move(const Position& pos, Move move, Move tt_move) const;
     static void update_pv(PVLine& dst, Move move, const PVLine& child);
 
     const IEvaluator& evaluator_;
@@ -211,6 +217,7 @@ class Searcher {
     Move previous_root_best_move_{};
     int rolling_bestmove_changes_ = 0;
     double session_nps_ema_ = 0.0;
+    bool use_eval_move_hooks_ = false;
 };
 
 }  // namespace makaira

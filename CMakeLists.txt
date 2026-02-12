@@ -16,6 +16,7 @@ add_library(makaira_core
     src/zobrist.cpp
     src/position.cpp
     src/movegen.cpp
+    src/movepicker.cpp
     src/perft.cpp
     src/search.cpp
 )
@@ -59,3 +60,8 @@ add_executable(makaira_eval_bench
     src/eval_bench.cpp
 )
 target_link_libraries(makaira_eval_bench PRIVATE makaira_core)
+
+add_executable(makaira_search_bench
+    src/search_bench.cpp
+)
+target_link_libraries(makaira_search_bench PRIVATE makaira_core)

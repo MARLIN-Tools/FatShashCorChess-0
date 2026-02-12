@@ -328,6 +328,9 @@ int main(int argc, char** argv) {
                           << " nps " << fun_display_count(info.nps)
                           << " string ttHit=" << info.stats.tt_hits << "/" << info.stats.tt_probes
                           << " qnodes=" << info.stats.qnodes
+                          << " mgen=" << info.stats.movegen_calls
+                          << " mgMoves=" << info.stats.moves_generated
+                          << " pick=" << info.stats.move_pick_iterations
                           << " pvsResearch=" << info.stats.pvs_researches
                           << " betaCuts=" << info.stats.beta_cutoffs
                           << " scoreDelta=" << info.score_delta
@@ -346,6 +349,49 @@ int main(int argc, char** argv) {
             });
 
             std::cout << "bestmove " << makaira::move_to_uci(result.best_move) << "\n";
+        } else if (line.rfind("benchraw", 0) == 0) {
+            const auto tokens = split_tokens(line);
+
+            makaira::SearchLimits limits;
+            limits.depth = 8;
+            limits.move_overhead_ms = 0;
+            limits.nodes_as_time = false;
+            for (std::size_t i = 1; i < tokens.size(); ++i) {
+                if (tokens[i] == "depth" && i + 1 < tokens.size()) {
+                    limits.depth = std::max(1, parse_int(tokens[++i], limits.depth));
+                } else if (tokens[i] == "nodes" && i + 1 < tokens.size()) {
+                    limits.nodes = static_cast<std::uint64_t>(std::max(1, parse_int(tokens[++i], 0)));
+                }
+            }
+
+            evaluator.clear_stats();
+            const auto started = std::chrono::steady_clock::now();
+            const auto result = searcher.search(position, limits);
+            const auto elapsed =
+              std::max<std::int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - started)
+                                           .count());
+            const std::uint64_t raw_nps = (result.stats.nodes * 1000ULL) / static_cast<std::uint64_t>(elapsed);
+            const double tthit = result.stats.tt_probes == 0
+                                   ? 0.0
+                                   : (100.0 * static_cast<double>(result.stats.tt_hits))
+                                       / static_cast<double>(result.stats.tt_probes);
+            const auto est = evaluator.stats();
+
+            std::cout << "info string benchraw depth " << result.depth
+                      << " seldepth " << result.seldepth
+                      << " nodes " << result.stats.nodes
+                      << " time_ms " << elapsed
+                      << " nps " << raw_nps
+                      << " tt_hit_pct " << tthit
+                      << " qnodes " << result.stats.qnodes
+                      << " movegen " << result.stats.movegen_calls
+                      << " moves_generated " << result.stats.moves_generated
+                      << " pick_iters " << result.stats.move_pick_iterations
+                      << " eval_calls " << est.eval_calls
+                      << " pawn_hash_hits " << est.pawn_hash_hits
+                      << " pawn_hash_misses " << est.pawn_hash_misses
+                      << "\n";
         } else if (line.rfind("perft", 0) == 0) {
             const auto tokens = split_tokens(line);
             if (tokens.size() >= 2) {

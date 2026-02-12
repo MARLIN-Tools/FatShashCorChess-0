@@ -12,11 +12,6 @@ void push_promotion_moves(MoveList& out, Square from, Square to, std::uint8_t fl
     out.push(Move(from, to, flags, KNIGHT));
 }
 
-bool is_enemy(const Position& pos, Square sq, Color us) {
-    const Piece pc = pos.piece_on(sq);
-    return pc != NO_PIECE && color_of(pc) != us;
-}
-
 }  // namespace
 
 void generate_pseudo_legal(const Position& pos, MoveList& out) {
@@ -36,14 +31,14 @@ void generate_pseudo_legal(const Position& pos, MoveList& out) {
 
         if (us == WHITE) {
             const Square one = static_cast<Square>(from + 8);
-            if (one <= SQ_H8 && pos.piece_on(one) == NO_PIECE) {
+            if (one <= SQ_H8 && (bb_from(one) & all_occ) == 0) {
                 if (r == RANK_7) {
                     push_promotion_moves(out, from, one, FLAG_NONE);
                 } else {
                     out.push(Move(from, one, FLAG_NONE));
                     if (r == RANK_2) {
                         const Square two = static_cast<Square>(from + 16);
-                        if (pos.piece_on(two) == NO_PIECE) {
+                        if ((bb_from(two) & all_occ) == 0) {
                             out.push(Move(from, two, FLAG_DOUBLE_PAWN));
                         }
                     }
@@ -52,7 +47,7 @@ void generate_pseudo_legal(const Position& pos, MoveList& out) {
 
             if (f > FILE_A) {
                 const Square to = static_cast<Square>(from + 7);
-                if (to <= SQ_H8 && is_enemy(pos, to, us)) {
+                if (to <= SQ_H8 && (bb_from(to) & opp_occ) != 0) {
                     if (r == RANK_7) {
                         push_promotion_moves(out, from, to, FLAG_CAPTURE);
                     } else {
@@ -65,7 +60,7 @@ void generate_pseudo_legal(const Position& pos, MoveList& out) {
             }
             if (f < FILE_H) {
                 const Square to = static_cast<Square>(from + 9);
-                if (to <= SQ_H8 && is_enemy(pos, to, us)) {
+                if (to <= SQ_H8 && (bb_from(to) & opp_occ) != 0) {
                     if (r == RANK_7) {
                         push_promotion_moves(out, from, to, FLAG_CAPTURE);
                     } else {
@@ -78,14 +73,14 @@ void generate_pseudo_legal(const Position& pos, MoveList& out) {
             }
         } else {
             const Square one = static_cast<Square>(from - 8);
-            if (one >= SQ_A1 && pos.piece_on(one) == NO_PIECE) {
+            if (one >= SQ_A1 && (bb_from(one) & all_occ) == 0) {
                 if (r == RANK_2) {
                     push_promotion_moves(out, from, one, FLAG_NONE);
                 } else {
                     out.push(Move(from, one, FLAG_NONE));
                     if (r == RANK_7) {
                         const Square two = static_cast<Square>(from - 16);
-                        if (pos.piece_on(two) == NO_PIECE) {
+                        if ((bb_from(two) & all_occ) == 0) {
                             out.push(Move(from, two, FLAG_DOUBLE_PAWN));
                         }
                     }
@@ -94,7 +89,7 @@ void generate_pseudo_legal(const Position& pos, MoveList& out) {
 
             if (f > FILE_A) {
                 const Square to = static_cast<Square>(from - 9);
-                if (to >= SQ_A1 && is_enemy(pos, to, us)) {
+                if (to >= SQ_A1 && (bb_from(to) & opp_occ) != 0) {
                     if (r == RANK_2) {
                         push_promotion_moves(out, from, to, FLAG_CAPTURE);
                     } else {
@@ -107,7 +102,7 @@ void generate_pseudo_legal(const Position& pos, MoveList& out) {
             }
             if (f < FILE_H) {
                 const Square to = static_cast<Square>(from - 7);
-                if (to >= SQ_A1 && is_enemy(pos, to, us)) {
+                if (to >= SQ_A1 && (bb_from(to) & opp_occ) != 0) {
                     if (r == RANK_2) {
                         push_promotion_moves(out, from, to, FLAG_CAPTURE);
                     } else {

@@ -1,5 +1,6 @@
 #include "search.h"
 
+#include "movepicker.h"
 #include "movegen.h"
 
 #include <algorithm>
@@ -11,16 +12,6 @@ namespace {
 constexpr int ASPIRATION_INITIAL = 24;
 constexpr int ASPIRATION_MAX = 1024;
 constexpr int TIME_INF = std::numeric_limits<int>::max() / 4;
-
-constexpr std::array<int, PIECE_TYPE_NB> PIECE_ORDER_VALUE = {
-  0,
-  100,
-  320,
-  330,
-  500,
-  900,
-  10000,
-};
 
 constexpr int MATE_SCORE_FOR_TT = VALUE_MATE - MAX_PLY;
 
@@ -334,33 +325,6 @@ bool Searcher::should_stop_hard() {
     return stop_;
 }
 
-int Searcher::score_move(const Position& pos, Move move, Move tt_move) const {
-    if (!tt_move.is_none() && move == tt_move) {
-        return 2'000'000;
-    }
-
-    if (move.is_capture()) {
-        Piece captured = NO_PIECE;
-        if (move.is_en_passant()) {
-            captured = make_piece(~pos.side_to_move(), PAWN);
-        } else {
-            captured = pos.piece_on(move.to());
-        }
-
-        const Piece attacker = pos.piece_on(move.from());
-        const int captured_value = captured == NO_PIECE ? 0 : PIECE_ORDER_VALUE[type_of(captured)];
-        const int attacker_value = attacker == NO_PIECE ? 0 : PIECE_ORDER_VALUE[type_of(attacker)];
-
-        return 1'000'000 + captured_value * 16 - attacker_value;
-    }
-
-    if (move.is_promotion()) {
-        return 900'000 + PIECE_ORDER_VALUE[move.promotion()];
-    }
-
-    return 0;
-}
-
 void Searcher::update_pv(PVLine& dst, Move move, const PVLine& child) {
     dst.moves[0] = move;
     dst.length = 1;
@@ -381,6 +345,7 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
     ++generation_;
 
     tm_.init(limits_, pos.side_to_move(), session_nps_ema_);
+    use_eval_move_hooks_ = evaluator_.requires_move_hooks();
 
     SearchResult result{};
     result.best_move = Move{};
@@ -577,36 +542,29 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
 
     const bool in_check = pos.in_check(pos.side_to_move());
 
-    MoveList moves;
-    generate_pseudo_legal(pos, moves);
-
-    std::array<int, 256> scores{};
-    for (int i = 0; i < moves.count; ++i) {
-        scores[i] = score_move(pos, moves[i], tt_move);
-    }
+    ++stats_.movegen_calls;
+    MovePicker picker(pos, tt_move, false);
+    stats_.moves_generated += static_cast<std::uint64_t>(picker.generated_count());
 
     int legal_moves = 0;
     int best_score = -VALUE_INFINITE;
     Move best_move{};
 
-    for (int i = 0; i < moves.count; ++i) {
-        int best_idx = i;
-        for (int j = i + 1; j < moves.count; ++j) {
-            if (scores[j] > scores[best_idx]) {
-                best_idx = j;
-            }
-        }
-        if (best_idx != i) {
-            std::swap(scores[i], scores[best_idx]);
-            std::swap(moves.moves[i], moves.moves[best_idx]);
+    while (true) {
+        MovePickPhase phase = MovePickPhase::END;
+        const Move move = picker.next(&phase);
+        if (move.is_none()) {
+            break;
         }
 
-        const Move move = moves[i];
+        ++stats_.move_pick_iterations;
         if (!pos.make_move(move)) {
             continue;
         }
 
-        evaluator_.on_make_move(pos, move);
+        if (use_eval_move_hooks_) {
+            evaluator_.on_make_move(pos, move);
+        }
 
         ++legal_moves;
 
@@ -624,7 +582,9 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
         }
 
         pos.unmake_move();
-        evaluator_.on_unmake_move(pos, move);
+        if (use_eval_move_hooks_) {
+            evaluator_.on_unmake_move(pos, move);
+        }
 
         if (stop_) {
             return 0;
@@ -642,6 +602,13 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
 
         if (alpha >= beta) {
             ++stats_.beta_cutoffs;
+            switch (phase) {
+                case MovePickPhase::TT: ++stats_.cutoff_tt; break;
+                case MovePickPhase::GOOD_CAPTURE: ++stats_.cutoff_good_capture; break;
+                case MovePickPhase::QUIET: ++stats_.cutoff_quiet; break;
+                case MovePickPhase::BAD_CAPTURE: ++stats_.cutoff_bad_capture; break;
+                case MovePickPhase::END: break;
+            }
             break;
         }
     }
@@ -692,47 +659,33 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply, PVLine& pv) {
         alpha = stand_pat;
     }
 
-    MoveList moves;
-    generate_pseudo_legal(pos, moves);
+    ++stats_.movegen_calls;
+    MovePicker picker(pos, Move{}, true);
+    stats_.moves_generated += static_cast<std::uint64_t>(picker.generated_count());
 
-    std::array<int, 256> scores{};
-    for (int i = 0; i < moves.count; ++i) {
-        const Move move = moves[i];
-        if (!move.is_capture() && !move.is_promotion()) {
-            scores[i] = std::numeric_limits<int>::min();
-        } else {
-            scores[i] = score_move(pos, move, Move{});
-        }
-    }
-
-    for (int i = 0; i < moves.count; ++i) {
-        int best_idx = i;
-        for (int j = i + 1; j < moves.count; ++j) {
-            if (scores[j] > scores[best_idx]) {
-                best_idx = j;
-            }
-        }
-        if (scores[best_idx] == std::numeric_limits<int>::min()) {
+    while (true) {
+        MovePickPhase phase = MovePickPhase::END;
+        const Move move = picker.next(&phase);
+        if (move.is_none()) {
             break;
         }
 
-        if (best_idx != i) {
-            std::swap(scores[i], scores[best_idx]);
-            std::swap(moves.moves[i], moves.moves[best_idx]);
-        }
-
-        const Move move = moves[i];
+        ++stats_.move_pick_iterations;
         if (!pos.make_move(move)) {
             continue;
         }
 
-        evaluator_.on_make_move(pos, move);
+        if (use_eval_move_hooks_) {
+            evaluator_.on_make_move(pos, move);
+        }
 
         PVLine child{};
         const int score = -qsearch(pos, -beta, -alpha, ply + 1, child);
 
         pos.unmake_move();
-        evaluator_.on_unmake_move(pos, move);
+        if (use_eval_move_hooks_) {
+            evaluator_.on_unmake_move(pos, move);
+        }
 
         if (stop_) {
             return 0;

@@ -61,6 +61,10 @@ class IEvaluator {
     virtual int static_eval(const Position& pos) const = 0;
     virtual int static_eval_trace(const Position& pos, EvalBreakdown* out) const;
 
+    // Evaluators that maintain incremental state (e.g. NNUE accumulators)
+    // can request make/unmake callbacks in the hot search loop.
+    virtual bool requires_move_hooks() const { return false; }
+
     virtual EvalStats stats() const;
     virtual void clear_stats();
 

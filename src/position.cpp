@@ -12,6 +12,8 @@
 namespace makaira {
 namespace {
 
+constexpr std::size_t HISTORY_RESERVE = 1024;
+
 std::array<int, SQ_NB> build_castling_masks() {
     std::array<int, SQ_NB> m{};
     m.fill(WHITE_OO | WHITE_OOO | BLACK_OO | BLACK_OOO);
@@ -73,6 +75,9 @@ void Position::clear() {
     non_pawn_material_ = {0, 0};
     phase_ = 0;
     history_.clear();
+    if (history_.capacity() < HISTORY_RESERVE) {
+        history_.reserve(HISTORY_RESERVE);
+    }
 }
 
 bool Position::set_startpos() {
@@ -339,10 +344,12 @@ bool Position::make_move(Move move) {
         return false;
     }
 
-    StateInfo st{};
+    history_.emplace_back();
+    StateInfo& st = history_.back();
     st.key = key_;
     st.move = move;
     st.moved_piece = moved;
+    st.captured_piece = NO_PIECE;
     st.castling_rights = castling_rights_;
     st.ep_square = ep_square_;
     st.halfmove_clock = halfmove_clock_;
@@ -352,7 +359,6 @@ bool Position::make_move(Move move) {
     st.eg_psqt = eg_psqt_;
     st.non_pawn_material = non_pawn_material_;
     st.phase = phase_;
-    history_.push_back(st);
 
     if (ep_square_ != SQ_NONE) {
         key_ ^= Zobrist.en_passant[file_of(ep_square_)];
@@ -444,8 +450,7 @@ void Position::unmake_move() {
         return;
     }
 
-    const StateInfo st = history_.back();
-    history_.pop_back();
+    const StateInfo& st = history_.back();
 
     const Move move = st.move;
     const Square from = move.from();
@@ -500,6 +505,8 @@ void Position::unmake_move() {
     eg_psqt_ = st.eg_psqt;
     non_pawn_material_ = st.non_pawn_material;
     phase_ = st.phase;
+
+    history_.pop_back();
 }
 
 void Position::update_occupancy_cache() {
