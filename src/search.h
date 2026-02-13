@@ -37,23 +37,23 @@ struct SearchConfig {
     bool use_nmp = true;
     bool use_lmr = true;
 
-    int history_max = 16384;
+    int history_max = 20923;
     int history_bonus_scale = 1;
-    int history_malus_divisor = 2;
-    int cont_history_2ply_divisor = 2;
+    int history_malus_divisor = 3;
+    int cont_history_2ply_divisor = 4;
 
-    int nmp_min_depth = 3;
-    int nmp_base_reduction = 3;
+    int nmp_min_depth = 2;
+    int nmp_base_reduction = 5;
     int nmp_depth_divisor = 6;
-    int nmp_margin_base = 80;
-    int nmp_margin_per_depth = 20;
-    int nmp_non_pawn_min = 700;
-    int nmp_verify_non_pawn_max = 1700;
+    int nmp_margin_base = 60;
+    int nmp_margin_per_depth = 14;
+    int nmp_non_pawn_min = 760;
+    int nmp_verify_non_pawn_max = 2004;
     int nmp_verify_min_depth = 8;
 
-    int lmr_min_depth = 3;
+    int lmr_min_depth = 2;
     int lmr_full_depth_moves = 2;
-    int lmr_history_threshold = 4000;
+    int lmr_history_threshold = 3426;
 };
 
 struct SearchStats {
@@ -201,6 +201,7 @@ class Searcher {
 
        private:
         static int clamp_ms(int v);
+        void refresh_check_period();
 
         SearchLimits limits_{};
         Color us_ = WHITE;
