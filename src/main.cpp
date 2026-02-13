@@ -1,6 +1,6 @@
 #include "bitboard.h"
 #include "evaluator.h"
-#include "hce_evaluator.h"
+#include "hybrid_evaluator.h"
 #include "movegen.h"
 #include "perft.h"
 #include "position.h"
@@ -42,6 +42,34 @@ std::uint64_t fun_display_count(std::uint64_t raw) {
     std::uint64_t knopen = raw;
     knopen += knopen / 7;
     return (knopen / 7) * 2199;
+}
+
+int run_openbench_bench(makaira::Searcher& searcher, makaira::Position& pos) {
+    // OpenBench expects a deterministic "bench" command that terminates and
+    // prints both nodes and nps-like tokens.
+    constexpr std::uint64_t kBenchNodes = 100000ULL;
+
+    if (!pos.set_startpos()) {
+        std::cerr << "bench failed: could not set startpos\n";
+        return 1;
+    }
+
+    makaira::SearchLimits limits;
+    limits.depth = 64;
+    limits.nodes = kBenchNodes;
+    limits.move_overhead_ms = 0;
+    limits.nodes_as_time = false;
+
+    const auto started = std::chrono::steady_clock::now();
+    (void)searcher.search(pos, limits);
+    const auto elapsed_ms = std::max<std::int64_t>(
+      1, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count());
+    const std::uint64_t nps = (kBenchNodes * 1000ULL) / static_cast<std::uint64_t>(elapsed_ms);
+
+    // Keep wording compatible with OpenBench parser in Client/bench.py.
+    std::cout << "nodes searched " << kBenchNodes << "\n";
+    std::cout << "nps " << nps << "\n";
+    return 0;
 }
 
 void run_perft(makaira::Position& pos, int depth, bool divide) {
@@ -127,6 +155,18 @@ bool parse_bool(const std::string& s) {
     return false;
 }
 
+std::string normalize_option_key(const std::string& name) {
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (std::isalnum(uc)) {
+            out.push_back(static_cast<char>(std::tolower(uc)));
+        }
+    }
+    return out;
+}
+
 makaira::SearchLimits parse_go_limits(const std::vector<std::string>& tokens) {
     makaira::SearchLimits limits;
 
@@ -180,9 +220,16 @@ void print_uci_score(int score) {
 }
 
 bool handle_setoption(makaira::Searcher& searcher,
+                      makaira::HybridEvaluator& evaluator,
                       makaira::SearchConfig& search_config,
                       int& move_overhead_ms,
+                      int& uci_threads,
                       bool& nodes_as_time,
+                      bool& use_lc0_eval,
+                      std::string& lc0_weights_file,
+                      int& lc0_cp_scale,
+                      int& lc0_score_map,
+                      std::string& status_message,
                       const std::vector<std::string>& tokens) {
     std::string name;
     std::string value;
@@ -217,29 +264,35 @@ bool handle_setoption(makaira::Searcher& searcher,
     for (char& c : name) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
+    const std::string key = normalize_option_key(name);
 
-    if (name == "hash") {
+    if (key == "hash") {
         const int mb = std::clamp(parse_int(value, 32), 1, 65536);
         searcher.set_hash_size_mb(static_cast<std::size_t>(mb));
         return true;
     }
 
-    if (name == "clear hash") {
+    if (key == "threads") {
+        uci_threads = std::clamp(parse_int(value, uci_threads), 1, 256);
+        return true;
+    }
+
+    if (key == "clearhash") {
         searcher.clear_hash();
         return true;
     }
 
-    if (name == "clear heuristics") {
+    if (key == "clearheuristics") {
         searcher.clear_heuristics();
         return true;
     }
 
-    if (name == "move overhead") {
+    if (key == "moveoverhead") {
         move_overhead_ms = std::clamp(parse_int(value, 30), 0, 10000);
         return true;
     }
 
-    if (name == "nodes as time") {
+    if (key == "nodesastime") {
         for (char& c : value) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
@@ -247,7 +300,58 @@ bool handle_setoption(makaira::Searcher& searcher,
         return true;
     }
 
-    if (name == "use history") {
+    if (key == "uselc0eval") {
+        for (char& c : value) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        use_lc0_eval = parse_bool(value);
+        evaluator.set_use_lc0(false);
+        if (!use_lc0_eval) {
+            status_message = "lc0 eval disabled";
+            return true;
+        }
+
+        evaluator.set_lc0_cp_scale(lc0_cp_scale);
+        evaluator.set_lc0_score_map(lc0_score_map);
+        if (!evaluator.lc0_ready() && !evaluator.load_lc0_weights(lc0_weights_file, true)) {
+            use_lc0_eval = false;
+            status_message = "failed to load lc0 weights: " + evaluator.lc0_last_error();
+            return true;
+        }
+
+        evaluator.set_use_lc0(true);
+        status_message = "lc0 eval enabled";
+        return true;
+    }
+
+    if (key == "lc0weightsfile") {
+        lc0_weights_file = value;
+        if (use_lc0_eval) {
+            evaluator.set_use_lc0(false);
+            if (!evaluator.load_lc0_weights(lc0_weights_file, true)) {
+                use_lc0_eval = false;
+                status_message = "failed to load lc0 weights: " + evaluator.lc0_last_error();
+                return true;
+            }
+            evaluator.set_use_lc0(true);
+        }
+        status_message = "lc0 weights file set";
+        return true;
+    }
+
+    if (key == "lc0cpscale") {
+        lc0_cp_scale = std::clamp(parse_int(value, lc0_cp_scale), 1, 2000);
+        evaluator.set_lc0_cp_scale(lc0_cp_scale);
+        return true;
+    }
+
+    if (key == "lc0scoremap") {
+        lc0_score_map = std::clamp(parse_int(value, lc0_score_map), 0, 2);
+        evaluator.set_lc0_score_map(lc0_score_map);
+        return true;
+    }
+
+    if (key == "usehistory") {
         for (char& c : value) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
@@ -256,7 +360,7 @@ bool handle_setoption(makaira::Searcher& searcher,
         return true;
     }
 
-    if (name == "use continuation history") {
+    if (key == "usecontinuationhistory") {
         for (char& c : value) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
@@ -265,7 +369,7 @@ bool handle_setoption(makaira::Searcher& searcher,
         return true;
     }
 
-    if (name == "use null move pruning") {
+    if (key == "usenullmovepruning") {
         for (char& c : value) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
@@ -274,7 +378,7 @@ bool handle_setoption(makaira::Searcher& searcher,
         return true;
     }
 
-    if (name == "use lmr") {
+    if (key == "uselmr") {
         for (char& c : value) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
@@ -283,38 +387,92 @@ bool handle_setoption(makaira::Searcher& searcher,
         return true;
     }
 
-    if (name == "history max") {
+    if (key == "historymax") {
         search_config.history_max = std::clamp(parse_int(value, search_config.history_max), 1024, 32767);
         searcher.set_search_config(search_config);
         return true;
     }
 
-    if (name == "nmp min depth") {
+    if (key == "historybonusscale") {
+        search_config.history_bonus_scale = std::clamp(parse_int(value, search_config.history_bonus_scale), 1, 16);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (key == "historymalusdivisor") {
+        search_config.history_malus_divisor = std::clamp(parse_int(value, search_config.history_malus_divisor), 1, 16);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (key == "conthistory2plydivisor") {
+        search_config.cont_history_2ply_divisor = std::clamp(parse_int(value, search_config.cont_history_2ply_divisor), 1, 8);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (key == "nmpmindepth") {
         search_config.nmp_min_depth = std::clamp(parse_int(value, search_config.nmp_min_depth), 2, 16);
         searcher.set_search_config(search_config);
         return true;
     }
 
-    if (name == "nmp margin base") {
+    if (key == "nmpbasereduction") {
+        search_config.nmp_base_reduction = std::clamp(parse_int(value, search_config.nmp_base_reduction), 1, 8);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (key == "nmpdepthdivisor") {
+        search_config.nmp_depth_divisor = std::clamp(parse_int(value, search_config.nmp_depth_divisor), 1, 16);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (key == "nmpmarginbase") {
         search_config.nmp_margin_base = std::clamp(parse_int(value, search_config.nmp_margin_base), 0, 500);
         searcher.set_search_config(search_config);
         return true;
     }
 
-    if (name == "nmp margin per depth") {
+    if (key == "nmpmarginperdepth") {
         search_config.nmp_margin_per_depth = std::clamp(parse_int(value, search_config.nmp_margin_per_depth), 0, 200);
         searcher.set_search_config(search_config);
         return true;
     }
 
-    if (name == "lmr min depth") {
+    if (key == "nmpnonpawnmin") {
+        search_config.nmp_non_pawn_min = std::clamp(parse_int(value, search_config.nmp_non_pawn_min), 0, 3000);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (key == "nmpverifynonpawnmax") {
+        search_config.nmp_verify_non_pawn_max = std::clamp(parse_int(value, search_config.nmp_verify_non_pawn_max), 0, 3000);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (key == "nmpverifymindepth") {
+        search_config.nmp_verify_min_depth = std::clamp(parse_int(value, search_config.nmp_verify_min_depth), 2, 24);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (key == "lmrmindepth") {
         search_config.lmr_min_depth = std::clamp(parse_int(value, search_config.lmr_min_depth), 2, 16);
         searcher.set_search_config(search_config);
         return true;
     }
 
-    if (name == "lmr full depth moves") {
+    if (key == "lmrfulldepthmoves") {
         search_config.lmr_full_depth_moves = std::clamp(parse_int(value, search_config.lmr_full_depth_moves), 0, 16);
+        searcher.set_search_config(search_config);
+        return true;
+    }
+
+    if (key == "lmrhistorythreshold") {
+        search_config.lmr_history_threshold = std::clamp(parse_int(value, search_config.lmr_history_threshold), 0, 16000);
         searcher.set_search_config(search_config);
         return true;
     }
@@ -328,17 +486,26 @@ int main(int argc, char** argv) {
     makaira::attacks::init();
     makaira::init_zobrist();
 
-    makaira::HCEEvaluator evaluator;
+    makaira::HybridEvaluator evaluator;
     makaira::Searcher searcher(evaluator);
     makaira::SearchConfig search_config{};
     searcher.set_search_config(search_config);
     int move_overhead_ms = 30;
+    int uci_threads = 1;
     bool nodes_as_time = false;
+    bool use_lc0_eval = false;
+    std::string lc0_weights_file = "t1-256x10-distilled-swa-2432500.pb.gz";
+    int lc0_cp_scale = 220;
+    int lc0_score_map = 1;
 
     makaira::Position position;
     if (!position.set_startpos()) {
         std::cerr << "Failed to set start position\n";
         return 1;
+    }
+
+    if (argc >= 2 && std::string(argv[1]) == "bench") {
+        return run_openbench_bench(searcher, position);
     }
 
     if (argc >= 3 && std::string(argv[1]) == "perft") {
@@ -362,25 +529,62 @@ int main(int argc, char** argv) {
 
     std::string line;
     while (std::getline(std::cin, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
         if (line == "uci") {
-            std::cout << "id name Makaira\n";
+            std::cout << "id name FatShashCorChess 0\n";
             std::cout << "id author MARLIN-Tools\n";
+            std::cout << "option name Threads type spin default " << uci_threads << " min 1 max 256\n";
             std::cout << "option name Hash type spin default 32 min 1 max 65536\n";
-            std::cout << "option name Move Overhead type spin default 30 min 0 max 10000\n";
-            std::cout << "option name Nodes as Time type check default false\n";
-            std::cout << "option name Use History type check default true\n";
-            std::cout << "option name Use Continuation History type check default true\n";
-            std::cout << "option name Use Null Move Pruning type check default true\n";
-            std::cout << "option name Use LMR type check default true\n";
-            std::cout << "option name History Max type spin default 16384 min 1024 max 32767\n";
-            std::cout << "option name NMP Min Depth type spin default 3 min 2 max 16\n";
-            std::cout << "option name NMP Margin Base type spin default 80 min 0 max 500\n";
-            std::cout << "option name NMP Margin Per Depth type spin default 20 min 0 max 200\n";
-            std::cout << "option name LMR Min Depth type spin default 3 min 2 max 16\n";
-            std::cout << "option name LMR Full Depth Moves type spin default 2 min 0 max 16\n";
+            std::cout << "option name MoveOverhead type spin default " << move_overhead_ms << " min 0 max 10000\n";
+            std::cout << "option name NodesAsTime type check default " << (nodes_as_time ? "true" : "false") << "\n";
+            std::cout << "option name UseLc0Eval type check default " << (use_lc0_eval ? "true" : "false") << "\n";
+            std::cout << "option name Lc0WeightsFile type string default " << lc0_weights_file << "\n";
+            std::cout << "option name Lc0CpScale type spin default " << lc0_cp_scale << " min 1 max 2000\n";
+            std::cout << "option name Lc0ScoreMap type spin default " << lc0_score_map << " min 0 max 2\n";
+            std::cout << "option name UseHistory type check default " << (search_config.use_history ? "true" : "false") << "\n";
+            std::cout << "option name UseContinuationHistory type check default "
+                      << (search_config.use_cont_history ? "true" : "false") << "\n";
+            std::cout << "option name UseNullMovePruning type check default "
+                      << (search_config.use_nmp ? "true" : "false") << "\n";
+            std::cout << "option name UseLMR type check default " << (search_config.use_lmr ? "true" : "false") << "\n";
+            std::cout << "option name HistoryMax type spin default " << search_config.history_max << " min 1024 max 32767\n";
+            std::cout << "option name HistoryBonusScale type spin default " << search_config.history_bonus_scale
+                      << " min 1 max 16\n";
+            std::cout << "option name HistoryMalusDivisor type spin default " << search_config.history_malus_divisor
+                      << " min 1 max 16\n";
+            std::cout << "option name ContHistory2PlyDivisor type spin default " << search_config.cont_history_2ply_divisor
+                      << " min 1 max 8\n";
+            std::cout << "option name NMPMinDepth type spin default " << search_config.nmp_min_depth << " min 2 max 16\n";
+            std::cout << "option name NMPBaseReduction type spin default " << search_config.nmp_base_reduction << " min 1 max 8\n";
+            std::cout << "option name NMPDepthDivisor type spin default " << search_config.nmp_depth_divisor << " min 1 max 16\n";
+            std::cout << "option name NMPMarginBase type spin default " << search_config.nmp_margin_base << " min 0 max 500\n";
+            std::cout << "option name NMPMarginPerDepth type spin default " << search_config.nmp_margin_per_depth
+                      << " min 0 max 200\n";
+            std::cout << "option name NMPNonPawnMin type spin default " << search_config.nmp_non_pawn_min << " min 0 max 3000\n";
+            std::cout << "option name NMPVerifyNonPawnMax type spin default " << search_config.nmp_verify_non_pawn_max
+                      << " min 0 max 3000\n";
+            std::cout << "option name NMPVerifyMinDepth type spin default " << search_config.nmp_verify_min_depth
+                      << " min 2 max 24\n";
+            std::cout << "option name LMRMinDepth type spin default " << search_config.lmr_min_depth << " min 2 max 16\n";
+            std::cout << "option name LMRFullDepthMoves type spin default " << search_config.lmr_full_depth_moves
+                      << " min 0 max 16\n";
+            std::cout << "option name LMRHistoryThreshold type spin default " << search_config.lmr_history_threshold
+                      << " min 0 max 16000\n";
             std::cout << "option name Clear Heuristics type button\n";
             std::cout << "uciok\n";
         } else if (line == "isready") {
+            if (use_lc0_eval && !evaluator.lc0_ready()) {
+                if (!evaluator.load_lc0_weights(lc0_weights_file, true)) {
+                    use_lc0_eval = false;
+                    evaluator.set_use_lc0(false);
+                    std::cout << "info string failed to load lc0 weights: " << evaluator.lc0_last_error() << "\n";
+                } else {
+                    evaluator.set_use_lc0(true);
+                }
+            }
             std::cout << "readyok\n";
         } else if (line == "ucinewgame") {
             position.set_startpos();
@@ -388,7 +592,22 @@ int main(int argc, char** argv) {
             searcher.clear_heuristics();
         } else if (line.rfind("setoption", 0) == 0) {
             const auto tokens = split_tokens(line);
-            handle_setoption(searcher, search_config, move_overhead_ms, nodes_as_time, tokens);
+            std::string option_status;
+            handle_setoption(searcher,
+                             evaluator,
+                             search_config,
+                             move_overhead_ms,
+                             uci_threads,
+                             nodes_as_time,
+                             use_lc0_eval,
+                             lc0_weights_file,
+                             lc0_cp_scale,
+                             lc0_score_map,
+                             option_status,
+                             tokens);
+            if (!option_status.empty()) {
+                std::cout << "info string " << option_status << "\n";
+            }
         } else if (line.rfind("position", 0) == 0) {
             const auto tokens = split_tokens(line);
             if (!handle_position(position, tokens)) {
