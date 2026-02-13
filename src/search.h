@@ -37,23 +37,23 @@ struct SearchConfig {
     bool use_nmp = true;
     bool use_lmr = true;
 
-    int history_max = 20923;
+    int history_max = 20815;
     int history_bonus_scale = 1;
-    int history_malus_divisor = 3;
+    int history_malus_divisor = 2;
     int cont_history_2ply_divisor = 4;
 
     int nmp_min_depth = 2;
-    int nmp_base_reduction = 5;
-    int nmp_depth_divisor = 6;
-    int nmp_margin_base = 60;
-    int nmp_margin_per_depth = 14;
-    int nmp_non_pawn_min = 760;
-    int nmp_verify_non_pawn_max = 2004;
-    int nmp_verify_min_depth = 8;
+    int nmp_base_reduction = 6;
+    int nmp_depth_divisor = 7;
+    int nmp_margin_base = 61;
+    int nmp_margin_per_depth = 18;
+    int nmp_non_pawn_min = 764;
+    int nmp_verify_non_pawn_max = 1988;
+    int nmp_verify_min_depth = 9;
 
     int lmr_min_depth = 2;
     int lmr_full_depth_moves = 2;
-    int lmr_history_threshold = 3426;
+    int lmr_history_threshold = 3366;
 };
 
 struct SearchStats {
