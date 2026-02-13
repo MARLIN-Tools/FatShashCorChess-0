@@ -1,6 +1,6 @@
 EXE ?= fatshashcorchess0
 BUILD_DIR ?= build-openbench
-TARGET ?= fatshashcorchess0
+TARGET ?= makaira
 CMAKE ?= cmake
 
 .PHONY: all clean
