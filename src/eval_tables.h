@@ -24,4 +24,12 @@ inline Score psqt(Piece pc, Square sq) {
     return PACKED_PSQT[pc][sq];
 }
 
+inline int psqt_bucket(Square sq, Color c) {
+    const Square wsq = c == WHITE ? sq : mirror_square(sq);
+    const int f = static_cast<int>(file_of(wsq));
+    const int r = static_cast<int>(rank_of(wsq));
+    const int ff = f <= 3 ? f : 7 - f;
+    return r * 4 + ff;
+}
+
 }  // namespace makaira::eval_tables

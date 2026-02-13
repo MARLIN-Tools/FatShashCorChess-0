@@ -1,6 +1,8 @@
 #include "eval_tables.h"
 
 #include "eval_params.h"
+#include "eval_params_tuned.h"
+#include "eval_psqt_tuned.h"
 
 #include <algorithm>
 #include <cmath>
@@ -115,9 +117,19 @@ void init_psqt() {
             const Score base = eval_params::PIECE_VALUE[pt];
             const Score w_delta = psqt_delta(ptype, white_sq);
             const Score b_delta = psqt_delta(ptype, black_sq);
+            const int w_bucket = psqt_bucket(white_sq, WHITE);
+            const int b_bucket = psqt_bucket(static_cast<Square>(sq), BLACK);
+            const Score w_tuned = make_score(
+              (eval_psqt_tuned::PSQT_BUCKET_MG[pt][w_bucket] * eval_params_tuned::PSQT_BUCKET_MG_SCALE) / 100,
+              (eval_psqt_tuned::PSQT_BUCKET_EG[pt][w_bucket] * eval_params_tuned::PSQT_BUCKET_EG_SCALE) / 100);
+            const Score b_tuned = make_score(
+              (eval_psqt_tuned::PSQT_BUCKET_MG[pt][b_bucket] * eval_params_tuned::PSQT_BUCKET_MG_SCALE) / 100,
+              (eval_psqt_tuned::PSQT_BUCKET_EG[pt][b_bucket] * eval_params_tuned::PSQT_BUCKET_EG_SCALE) / 100);
 
-            PACKED_PSQT[make_piece(WHITE, ptype)][sq] = make_score(base.mg + w_delta.mg, base.eg + w_delta.eg);
-            PACKED_PSQT[make_piece(BLACK, ptype)][sq] = make_score(base.mg + b_delta.mg, base.eg + b_delta.eg);
+            PACKED_PSQT[make_piece(WHITE, ptype)][sq] =
+              make_score(base.mg + w_delta.mg + w_tuned.mg, base.eg + w_delta.eg + w_tuned.eg);
+            PACKED_PSQT[make_piece(BLACK, ptype)][sq] =
+              make_score(base.mg + b_delta.mg + b_tuned.mg, base.eg + b_delta.eg + b_tuned.eg);
         }
     }
 }
