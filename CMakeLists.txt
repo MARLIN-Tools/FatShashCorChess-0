@@ -6,8 +6,30 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(FATSHASHCORCHESS0_BUILD_TESTS "Build FatShashCorChess 0 test executables" ON)
+option(FATSHASHCORCHESS0_FETCH_ONEDNN "Auto-fetch oneDNN if not installed" OFF)
 
 find_package(ZLIB QUIET)
+find_package(dnnl QUIET CONFIG)
+if (NOT dnnl_FOUND)
+    find_package(DNNL QUIET CONFIG)
+endif()
+
+if (NOT dnnl_FOUND AND NOT DNNL_FOUND AND FATSHASHCORCHESS0_FETCH_ONEDNN)
+    include(FetchContent)
+    set(DNNL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(DNNL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(DNNL_BUILD_GRAPH OFF CACHE BOOL "" FORCE)
+    set(DNNL_LIBRARY_TYPE STATIC CACHE STRING "" FORCE)
+    FetchContent_Declare(
+        oneDNN
+        GIT_REPOSITORY https://github.com/uxlfoundation/oneDNN.git
+        GIT_TAG v3.6.2
+    )
+    FetchContent_MakeAvailable(oneDNN)
+    if (TARGET dnnl)
+        set(dnnl_FOUND ON)
+    endif()
+endif()
 
 add_library(fatshashcorchess0_core
     src/bitboard.cpp
@@ -19,6 +41,7 @@ add_library(fatshashcorchess0_core
     src/lc0/lc0_attention_value.cpp
     src/lc0/lc0_evaluator.cpp
     src/lc0/lc0_features112.cpp
+    src/lc0/lc0_linear_backend.cpp
     src/lc0/lc0_proto_wire.cpp
     src/lc0/lc0_tables.cpp
     src/lc0/lc0_weights.cpp
@@ -45,6 +68,18 @@ if (ZLIB_FOUND)
 else()
     target_compile_definitions(fatshashcorchess0_core PRIVATE MAKAIRA_HAS_ZLIB=0)
 endif()
+
+if (dnnl_FOUND)
+    target_compile_definitions(fatshashcorchess0_core PRIVATE MAKAIRA_HAS_DNNL=1)
+    target_link_libraries(fatshashcorchess0_core PRIVATE dnnl)
+elseif (DNNL_FOUND)
+    target_compile_definitions(fatshashcorchess0_core PRIVATE MAKAIRA_HAS_DNNL=1)
+    target_link_libraries(fatshashcorchess0_core PRIVATE DNNL::DNNL)
+else()
+    target_compile_definitions(fatshashcorchess0_core PRIVATE MAKAIRA_HAS_DNNL=0)
+endif()
+
+target_compile_definitions(fatshashcorchess0_core PRIVATE MAKAIRA_HAS_ORT=1)
 
 add_executable(fatshashcorchess0
     src/main.cpp
