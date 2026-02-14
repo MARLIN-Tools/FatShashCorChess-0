@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Build multiple Makaira commit binaries and run pairwise SPRT matches.
+Build multiple FatShashCorChess 0 commit binaries and run pairwise SPRT matches via fastchess.
 
 Requires:
   - Python 3
-  - python-chess (`pip install chess`)
   - CMake + build toolchain
+  - fastchess executable
 """
 
 from __future__ import annotations
@@ -15,15 +15,11 @@ import dataclasses
 import math
 import os
 import pathlib
-import random
+import re
 import shutil
 import subprocess
 import sys
-import time
 from typing import Iterable, List, Tuple
-
-import chess
-import chess.engine
 
 
 @dataclasses.dataclass
@@ -80,7 +76,7 @@ def commit_subject(repo: pathlib.Path, commit: str) -> str:
 
 
 def binary_name(commit: str) -> str:
-    return f"makaira_{commit[:8]}.exe" if os.name == "nt" else f"makaira_{commit[:8]}"
+    return f"fatshashcorchess0_{commit[:8]}.exe" if os.name == "nt" else f"fatshashcorchess0_{commit[:8]}"
 
 
 def build_commit(repo: pathlib.Path, commit: str, out_dir: pathlib.Path, jobs: int, keep_worktrees: bool) -> pathlib.Path | None:
@@ -107,9 +103,9 @@ def build_commit(repo: pathlib.Path, commit: str, out_dir: pathlib.Path, jobs: i
         run(["cmake", "--build", str(build_dir), "--config", "Release", "-j", str(jobs)], cwd=repo)
 
         candidates = [
-            build_dir / "Release" / "makaira.exe",
-            build_dir / "makaira.exe",
-            build_dir / "makaira",
+            build_dir / "Release" / "fatshashcorchess0.exe",
+            build_dir / "fatshashcorchess0.exe",
+            build_dir / "fatshashcorchess0",
         ]
         src_bin = next((p for p in candidates if p.exists()), None)
         if not src_bin:
@@ -158,105 +154,47 @@ def sprt_bound_lower(alpha: float, beta: float) -> float:
     return math.log(beta / (1.0 - alpha))
 
 
-def play_one_game(
-    white: chess.engine.SimpleEngine,
-    black: chess.engine.SimpleEngine,
-    start_fen: str,
-    movetime_ms: int,
-    max_plies: int,
-) -> str:
-    board = chess.Board(start_fen)
-    limit = chess.engine.Limit(time=max(0.001, movetime_ms / 1000.0))
+def find_fastchess(explicit_path: str | None) -> pathlib.Path | None:
+    if explicit_path:
+        p = pathlib.Path(explicit_path).expanduser().resolve()
+        if p.exists():
+            return p
+        return None
 
-    for _ in range(max_plies):
-        if board.is_game_over(claim_draw=True):
-            break
-        engine = white if board.turn == chess.WHITE else black
-        try:
-            result = engine.play(board, limit)
-        except (chess.engine.EngineError, chess.engine.EngineTerminatedError):
-            # Side to move produced invalid/terminated response: forfeit loss.
-            return "0-1" if board.turn == chess.WHITE else "1-0"
+    env_path = os.getenv("FASTCHESS")
+    if env_path:
+        p = pathlib.Path(env_path).expanduser().resolve()
+        if p.exists():
+            return p
 
-        if result.move is None or result.move == chess.Move.null():
-            # Null move / no move in normal play is treated as forfeit.
-            return "0-1" if board.turn == chess.WHITE else "1-0"
+    for exe in ("fastchess.exe", "fastchess"):
+        which = shutil.which(exe)
+        if which:
+            return pathlib.Path(which).resolve()
 
-        if result.move not in board.legal_moves:
-            # Defensive check: illegal move from engine is immediate loss.
-            return "0-1" if board.turn == chess.WHITE else "1-0"
-
-        board.push(result.move)
-
-    if not board.is_game_over(claim_draw=True):
-        return "1/2-1/2"
-    return board.result(claim_draw=True)
+    home = pathlib.Path.home()
+    roots = [home / "Downloads", home / "Desktop"]
+    patterns = ["fastchess.exe", "fastchess*.exe"]
+    for root in roots:
+        if not root.exists():
+            continue
+        for pat in patterns:
+            for found in root.rglob(pat):
+                if found.is_file():
+                    return found.resolve()
+    return None
 
 
-def match_sprt(
-    challenger: EngineVersion,
-    opponent: EngineVersion,
-    openings: List[str],
-    movetime_ms: int,
-    max_plies: int,
-    sprt: SprtConfig,
-    hash_mb: int,
-    threads: int,
-    seed: int,
-) -> SprtResult:
-    rng = random.Random(seed)
-    opening_pool = openings[:]
-    rng.shuffle(opening_pool)
-    if not opening_pool:
-        opening_pool = [chess.STARTING_FEN]
-
-    outcomes: List[float] = []
-    wins = draws = losses = 0
-    upper = sprt_bound_upper(sprt.alpha, sprt.beta)
-    lower = sprt_bound_lower(sprt.alpha, sprt.beta)
-
-    with chess.engine.SimpleEngine.popen_uci(str(challenger.binary)) as eng_c, chess.engine.SimpleEngine.popen_uci(
-        str(opponent.binary)
-    ) as eng_o:
-        # Optional common options for fairness.
-        for eng in (eng_c, eng_o):
-            try:
-                eng.configure({"Hash": hash_mb, "Threads": threads})
-            except Exception:
-                pass
-
-        for g in range(sprt.max_games):
-            fen = opening_pool[g % len(opening_pool)]
-            challenger_white = (g % 2) == 0
-            white = eng_c if challenger_white else eng_o
-            black = eng_o if challenger_white else eng_c
-
-            result = play_one_game(white, black, fen, movetime_ms, max_plies)
-
-            if result == "1-0":
-                score = 1.0 if challenger_white else 0.0
-            elif result == "0-1":
-                score = 0.0 if challenger_white else 1.0
-            else:
-                score = 0.5
-
-            outcomes.append(score)
-            if score == 1.0:
-                wins += 1
-            elif score == 0.5:
-                draws += 1
-            else:
-                losses += 1
-
-            llr = sprt_llr(outcomes, sprt.elo0, sprt.elo1)
-            if len(outcomes) >= sprt.min_games:
-                if llr >= upper:
-                    return SprtResult("H1", len(outcomes), sum(outcomes), llr, wins, draws, losses)
-                if llr <= lower:
-                    return SprtResult("H0", len(outcomes), sum(outcomes), llr, wins, draws, losses)
-
-    llr = sprt_llr(outcomes, sprt.elo0, sprt.elo1)
-    return SprtResult("INCONCLUSIVE", len(outcomes), sum(outcomes), llr, wins, draws, losses)
+def normalize_fen(fen_like: str) -> str | None:
+    # Keep only the FEN fields and ensure 6-field FEN.
+    fields = fen_like.split()
+    if len(fields) < 4:
+        return None
+    if len(fields) == 4:
+        fields.extend(["0", "1"])
+    elif len(fields) == 5:
+        fields.append("1")
+    return " ".join(fields[:6])
 
 
 def load_fens(paths: Iterable[pathlib.Path]) -> List[str]:
@@ -264,39 +202,213 @@ def load_fens(paths: Iterable[pathlib.Path]) -> List[str]:
     for path in paths:
         if not path.exists():
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
-            out.append(line)
+            # Accept EPD/FEN lines and drop trailing inline comments.
+            if "#" in line:
+                line = line.split("#", 1)[0].strip()
+            if ";" in line:
+                line = line.split(";", 1)[0].strip()
+            if not line:
+                continue
+            fen = normalize_fen(line)
+            if fen:
+                out.append(fen)
     return out
 
 
+def write_openings_file(openings: List[str], path: pathlib.Path) -> pathlib.Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as f:
+        for fen in openings:
+            f.write(fen + "\n")
+    return path
+
+
+RESULTS_RE = re.compile(
+    r"Games:\s*(?P<games>\d+),\s*Wins:\s*(?P<wins>\d+),\s*Losses:\s*(?P<losses>\d+),\s*Draws:\s*(?P<draws>\d+),\s*Points:\s*(?P<points>[-+]?\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+LLR_RE = re.compile(
+    r"LLR:\s*(?P<llr>[-+]?\d+(?:\.\d+)?)\s*\([^)]+\)\s*\((?P<lower>[-+]?\d+(?:\.\d+)?),\s*(?P<upper>[-+]?\d+(?:\.\d+)?)\)",
+    re.IGNORECASE,
+)
+
+
+def parse_fastchess_result(output: str, fallback_cfg: SprtConfig) -> SprtResult:
+    m_res = None
+    for m in RESULTS_RE.finditer(output):
+        m_res = m
+    if not m_res:
+        raise RuntimeError("Could not parse fastchess results block.")
+
+    games = int(m_res.group("games"))
+    wins = int(m_res.group("wins"))
+    losses = int(m_res.group("losses"))
+    draws = int(m_res.group("draws"))
+    points = float(m_res.group("points"))
+
+    llr = 0.0
+    lower = sprt_bound_lower(fallback_cfg.alpha, fallback_cfg.beta)
+    upper = sprt_bound_upper(fallback_cfg.alpha, fallback_cfg.beta)
+
+    m_llr = None
+    for m in LLR_RE.finditer(output):
+        m_llr = m
+    if m_llr:
+        llr = float(m_llr.group("llr"))
+        lower = float(m_llr.group("lower"))
+        upper = float(m_llr.group("upper"))
+
+    decision = "INCONCLUSIVE"
+    if "SPRT: H1" in output:
+        decision = "H1"
+    elif "SPRT: H0" in output:
+        decision = "H0"
+    else:
+        if llr >= upper:
+            decision = "H1"
+        elif llr <= lower:
+            decision = "H0"
+
+    return SprtResult(
+        decision=decision,
+        games=games,
+        score=points,
+        llr=llr,
+        wins=wins,
+        draws=draws,
+        losses=losses,
+    )
+
+
+def match_sprt_fastchess(
+    fastchess: pathlib.Path,
+    challenger: EngineVersion,
+    opponent: EngineVersion,
+    openings_file: pathlib.Path,
+    tc: str,
+    movetime_ms: int,
+    sprt: SprtConfig,
+    hash_mb: int,
+    threads: int,
+    seed: int,
+    games_per_match: int,
+    pgn_dir: pathlib.Path | None,
+) -> SprtResult:
+    rounds = max(1, (games_per_match + 1) // 2)
+
+    engine_a_args = [
+        f"name={challenger.short}",
+        f"cmd={str(challenger.binary)}",
+        f"option.Hash={hash_mb}",
+    ]
+    engine_b_args = [
+        f"name={opponent.short}",
+        f"cmd={str(opponent.binary)}",
+        f"option.Hash={hash_mb}",
+    ]
+    if threads > 1:
+        engine_a_args.append(f"option.Threads={threads}")
+        engine_b_args.append(f"option.Threads={threads}")
+
+    cmd = [
+        str(fastchess),
+        "-engine",
+        *engine_a_args,
+        "-engine",
+        *engine_b_args,
+    ]
+
+    each = ["-each", "proto=uci"]
+    if movetime_ms > 0:
+        st_seconds = max(0.001, movetime_ms / 1000.0)
+        each.append(f"st={st_seconds:.3f}")
+    else:
+        each.append(f"tc={tc}")
+
+    cmd += each
+    cmd += [
+        "-rounds",
+        str(rounds),
+        "-repeat",
+        "-openings",
+        f"file={str(openings_file)}",
+        "format=epd",
+        "order=random",
+        "-srand",
+        str(seed),
+        "-sprt",
+        f"elo0={sprt.elo0}",
+        f"elo1={sprt.elo1}",
+        f"alpha={sprt.alpha}",
+        f"beta={sprt.beta}",
+    ]
+
+    if pgn_dir:
+        pgn_dir.mkdir(parents=True, exist_ok=True)
+        pgn = pgn_dir / f"{challenger.short}_vs_{opponent.short}.pgn"
+        cmd.extend(["-pgnout", f"file={str(pgn)}"])
+
+    cp = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    output = (cp.stdout or "") + "\n" + (cp.stderr or "")
+
+    if cp.returncode != 0 and "Finished match" not in output:
+        tail = "\n".join(output.splitlines()[-40:])
+        raise RuntimeError(f"fastchess failed ({cp.returncode}):\n{tail}")
+
+    return parse_fastchess_result(output, sprt)
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Build Makaira versions and run pairwise SPRT matches.")
-    ap.add_argument("--repo", default=".", help="Path to Makaira git repo")
+    ap = argparse.ArgumentParser(description="Build FatShashCorChess 0 versions and run pairwise SPRT matches using fastchess.")
+    ap.add_argument("--repo", default=".", help="Path to FatShashCorChess 0 git repo")
     ap.add_argument("--rev", default="main", help="Revision to enumerate commits from")
     ap.add_argument("--max-commits", type=int, default=0, help="Use last N commits (0 = all)")
     ap.add_argument("--first-parent", action="store_true", default=True, help="Use first-parent history")
     ap.add_argument("--out", default="sprt", help="Output dir")
     ap.add_argument("--jobs", type=int, default=8, help="Build parallel jobs")
     ap.add_argument("--keep-worktrees", action="store_true", help="Keep temporary worktrees")
-    ap.add_argument("--movetime-ms", type=int, default=30, help="Per-move time in ms")
-    ap.add_argument("--max-plies", type=int, default=220, help="Max plies per game before draw adjudication")
+    ap.add_argument("--fastchess", default="", help="Path to fastchess binary (auto-detect if omitted)")
+    ap.add_argument("--tc", default="10+0.1", help="fastchess time control (used when --movetime-ms <= 0)")
+    ap.add_argument("--movetime-ms", type=int, default=-1, help="Legacy per-move time in ms; overrides --tc when >0")
     ap.add_argument("--alpha", type=float, default=0.05)
     ap.add_argument("--beta", type=float, default=0.05)
     ap.add_argument("--elo0", type=float, default=0.0)
     ap.add_argument("--elo1", type=float, default=5.0)
-    ap.add_argument("--min-games", type=int, default=20)
-    ap.add_argument("--max-games", type=int, default=120)
+    ap.add_argument(
+        "--games-per-match",
+        type=int,
+        default=1000,
+        help="Total games per pair (uses rounds=ceil(games/2) with color-repeat).",
+    )
+    ap.add_argument("--min-games", type=int, default=0)
+    ap.add_argument("--max-games", type=int, default=0)
     ap.add_argument("--hash", type=int, default=32)
     ap.add_argument("--threads", type=int, default=1)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--openings", nargs="*", default=[], help="Opening files (FEN/EPD); defaults to bench/fens.txt")
+    ap.add_argument("--save-pgn", action="store_true", help="Save PGN for each pair match")
     args = ap.parse_args()
+
+    if args.games_per_match <= 0:
+        print("games-per-match must be > 0.", file=sys.stderr)
+        return 1
+
+    if args.min_games > 0 or args.max_games > 0:
+        print("Note: fastchess controls game count via --games-per-match; min/max are ignored.", file=sys.stderr)
 
     repo = pathlib.Path(args.repo).resolve()
     out_dir = pathlib.Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    fastchess = find_fastchess(args.fastchess or None)
+    if not fastchess:
+        print("Could not find fastchess. Set --fastchess or FASTCHESS env var.", file=sys.stderr)
+        return 1
+    print(f"Using fastchess: {fastchess}")
 
     commits = collect_commits(repo, args.rev, args.first_parent, args.max_commits)
     if not commits:
@@ -318,22 +430,20 @@ def main() -> int:
         print("Need at least 2 buildable versions.", file=sys.stderr)
         return 1
 
-    openings = load_fens(
-        [
-            repo / "bench" / "fens.txt",
-            repo / "bench" / "tactical_fens.txt",
-        ]
-    )
+    opening_paths = [pathlib.Path(p).resolve() for p in args.openings] if args.openings else [repo / "bench" / "fens.txt"]
+    openings = load_fens(opening_paths)
     if not openings:
-        openings = [chess.STARTING_FEN]
+        print("No valid opening FEN/EPD entries found.", file=sys.stderr)
+        return 1
+    openings_file = write_openings_file(openings, out_dir / "openings_fastchess.epd")
 
     sprt_cfg = SprtConfig(
         alpha=args.alpha,
         beta=args.beta,
         elo0=args.elo0,
         elo1=args.elo1,
-        min_games=args.min_games,
-        max_games=args.max_games,
+        min_games=args.games_per_match,
+        max_games=args.games_per_match,
     )
 
     wins = {v.short: 0 for v in versions}
@@ -342,25 +452,31 @@ def main() -> int:
     points = {v.short: 0.0 for v in versions}
     games = {v.short: 0 for v in versions}
 
-    print("\nRunning pairwise SPRT matches...")
-    pair_results: List[Tuple[str, str, SprtResult]] = []
+    print("\nRunning pairwise fastchess SPRT matches...")
     for i in range(len(versions)):
         for j in range(i + 1, len(versions)):
             a = versions[i]
             b = versions[j]
             seed = args.seed + i * 1000 + j
-            res = match_sprt(
-                challenger=a,
-                opponent=b,
-                openings=openings,
-                movetime_ms=args.movetime_ms,
-                max_plies=args.max_plies,
-                sprt=sprt_cfg,
-                hash_mb=args.hash,
-                threads=args.threads,
-                seed=seed,
-            )
-            pair_results.append((a.short, b.short, res))
+            try:
+                res = match_sprt_fastchess(
+                    fastchess=fastchess,
+                    challenger=a,
+                    opponent=b,
+                    openings_file=openings_file,
+                    tc=args.tc,
+                    movetime_ms=args.movetime_ms,
+                    sprt=sprt_cfg,
+                    hash_mb=args.hash,
+                    threads=args.threads,
+                    seed=seed,
+                    games_per_match=args.games_per_match,
+                    pgn_dir=(out_dir / "pgn") if args.save_pgn else None,
+                )
+            except RuntimeError as exc:
+                print(f"{a.short} vs {b.short}: ERROR\n{exc}", file=sys.stderr)
+                continue
+
             points[a.short] += res.score
             games[a.short] += res.games
             points[b.short] += float(res.games) - res.score

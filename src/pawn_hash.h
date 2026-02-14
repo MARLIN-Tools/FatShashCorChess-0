@@ -13,8 +13,18 @@ namespace makaira {
 struct PawnHashEntry {
     Key key = 0;
     Score pawn_score{};
+    Score passed_score{};
+    Score isolated_score{};
+    Score doubled_score{};
+    Score backward_score{};
+    Score candidate_score{};
+    Score connected_score{};
+    Score supported_score{};
+    Score outside_score{};
+    Score blocked_score{};
     std::array<Bitboard, COLOR_NB> passed{{0, 0}};
-    std::array<int, COLOR_NB> shelter_mg{{0, 0}};
+    std::array<int, COLOR_NB> shelter_bonus_mg{{0, 0}};
+    std::array<int, COLOR_NB> storm_penalty_mg{{0, 0}};
 };
 
 class PawnHashTable {

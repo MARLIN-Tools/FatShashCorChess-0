@@ -38,7 +38,10 @@ int main() {
 
     eval.set_lc0_cp_scale(220);
     eval.set_lc0_score_map(1);
-    eval.set_use_lc0(true);
+    eval.set_lc0_eval_threads(2);
+    eval.set_lc0_batch_max(8);
+    eval.set_lc0_batch_wait_us(500);
+    eval.set_backend(makaira::HybridEvaluator::Backend::LC0_FP32_ASYNC);
 
     const int nn_score = eval.static_eval(pos);
     if (nn_score < -30000 || nn_score > 30000) {

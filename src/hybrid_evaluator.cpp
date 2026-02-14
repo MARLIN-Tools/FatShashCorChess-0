@@ -6,6 +6,40 @@ HybridEvaluator::HybridEvaluator() = default;
 
 void HybridEvaluator::set_use_lc0(bool enabled) {
     use_lc0_ = enabled;
+    if (!use_lc0_) {
+        backend_ = Backend::HCE;
+    } else if (backend_ == Backend::HCE) {
+        backend_ = Backend::LC0_FP32;
+    }
+}
+
+void HybridEvaluator::set_backend(Backend backend) {
+    backend_ = backend;
+    if (backend_ == Backend::HCE) {
+        use_lc0_ = false;
+        return;
+    }
+
+    use_lc0_ = true;
+    if (backend_ == Backend::LC0_FP32) {
+        lc0_.set_backend(Lc0Evaluator::Backend::FP32_SYNC);
+    } else if (backend_ == Backend::LC0_FP32_ASYNC) {
+        lc0_.set_backend(Lc0Evaluator::Backend::FP32_ASYNC);
+    } else {
+        lc0_.set_backend(Lc0Evaluator::Backend::INT8_PLACEHOLDER);
+    }
+}
+
+void HybridEvaluator::set_backend_from_int(int backend) {
+    if (backend <= 0) {
+        set_backend(Backend::HCE);
+    } else if (backend == 1) {
+        set_backend(Backend::LC0_FP32);
+    } else if (backend == 2) {
+        set_backend(Backend::LC0_FP32_ASYNC);
+    } else {
+        set_backend(Backend::LC0_INT8);
+    }
 }
 
 bool HybridEvaluator::load_lc0_weights(const std::string& path, bool strict_t1_shape) {
@@ -13,7 +47,7 @@ bool HybridEvaluator::load_lc0_weights(const std::string& path, bool strict_t1_s
 }
 
 const IEvaluator& HybridEvaluator::active() const {
-    if (use_lc0_ && lc0_.is_ready()) {
+    if (backend_ != Backend::HCE && use_lc0_ && lc0_.is_ready()) {
         return lc0_;
     }
     return hce_;
@@ -49,4 +83,3 @@ void HybridEvaluator::on_unmake_move(const Position& pos, Move move) const {
 }
 
 }  // namespace makaira
-

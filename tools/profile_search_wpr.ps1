@@ -1,10 +1,10 @@
 param(
-    [string]$BenchExe = ".\build-rel\Release\makaira_search_bench.exe",
+    [string]$BenchExe = ".\build-rel\Release\fatshashcorchess0_search_bench.exe",
     [string]$FenSuite = ".\bench\fens.txt",
     [int]$Depth = 10,
     [UInt64]$Nodes = 0,
     [int]$HashMB = 32,
-    [string]$Output = ".\makaira_cpu.etl"
+    [string]$Output = ".\fatshashcorchess0_cpu.etl"
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,4 +35,3 @@ finally {
 }
 
 Write-Host "Done. Open $Output in Windows Performance Analyzer."
-

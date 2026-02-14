@@ -1,4 +1,4 @@
-# Makaira Search Profile Report
+# FatShashCorChess 0 Search Profile Report
 
 ## Environment
 - Commit:
@@ -43,4 +43,3 @@
 1.
 2.
 3.
-

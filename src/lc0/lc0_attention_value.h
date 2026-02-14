@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lc0_features112.h"
+#include "lc0_linear_backend.h"
 #include "lc0_weights.h"
 
 namespace makaira::lc0 {
@@ -11,6 +12,6 @@ struct WdlOutput {
     float loss = 0.0f;
 };
 
-WdlOutput forward_attention_value(const Weights& w, const InputPlanes112& input);
+WdlOutput forward_attention_value(const Weights& w, const InputPlanes112& input, LinearBackend* backend = nullptr);
 
 }  // namespace makaira::lc0

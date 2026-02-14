@@ -57,7 +57,7 @@ bool parse_options(int argc, char** argv, BenchOptions& opt) {
             }
             opt.hash_mb = std::clamp(std::stoi(v), 1, 65536);
         } else if (arg == "--help" || arg == "-h") {
-            std::cout << "Usage: makaira_search_bench [--fen-suite file] [--depth D] [--nodes N] [--hash MB]\n";
+            std::cout << "Usage: fatshashcorchess0_search_bench [--fen-suite file] [--depth D] [--nodes N] [--hash MB]\n";
             return false;
         } else {
             std::cerr << "unknown option: " << arg << "\n";

@@ -26,6 +26,9 @@ struct SearchLimits {
     int binc_ms = 0;
     int movestogo = 0;
     int move_overhead_ms = 30;
+    int time_poll_target_us = 1000;
+    int time_poll_emergency_us = 250;
+    int time_poll_min_nodes = 8;
     bool infinite = false;
     bool ponder = false;
     bool nodes_as_time = false;
@@ -79,6 +82,10 @@ struct SearchStats {
     std::uint64_t lmr_reduced = 0;
     std::uint64_t lmr_researches = 0;
     std::uint64_t lmr_fail_high_after_reduce = 0;
+    std::uint64_t hard_stop_checks = 0;
+    std::uint64_t hard_stop_total_nodes_gap = 0;
+    std::uint64_t hard_stop_max_nodes_gap = 0;
+    std::uint64_t hard_stop_max_ms_gap = 0;
 };
 
 struct SearchResult {
@@ -100,7 +107,7 @@ struct SearchIterationInfo {
     int bestmove_changes = 0;
     int root_legal_moves = 0;
     int stability_score = 0;
-    int complexity_x100 = 100;
+        int complexity_x100 = 100;
     int optimum_time_ms = 0;
     int effective_optimum_ms = 0;
     int maximum_time_ms = 0;
@@ -198,6 +205,11 @@ class Searcher {
         int maximum_ms() const { return maximum_time_ms_; }
         int stability_score() const { return last_stability_score_; }
         int complexity_x100() const { return last_complexity_x100_; }
+        std::uint64_t hard_stop_checks() const { return hard_stop_checks_; }
+        std::uint64_t hard_stop_total_nodes_gap() const { return hard_stop_total_nodes_gap_; }
+        std::uint64_t hard_stop_max_nodes_gap() const { return hard_stop_max_nodes_gap_; }
+        std::uint64_t hard_stop_max_ms_gap() const { return hard_stop_max_ms_gap_; }
+        std::uint64_t check_period_nodes() const { return check_period_nodes_; }
 
        private:
         static int clamp_ms(int v);
@@ -225,6 +237,13 @@ class Searcher {
         double nps_ema_ = 0.0;
         std::uint64_t next_check_node_ = 1024;
         std::uint64_t check_period_nodes_ = 1024;
+        std::uint64_t hard_stop_checks_ = 0;
+        std::uint64_t hard_stop_total_nodes_gap_ = 0;
+        std::uint64_t hard_stop_max_nodes_gap_ = 0;
+        std::uint64_t hard_stop_max_ms_gap_ = 0;
+        std::uint64_t last_check_nodes_ = 0;
+        std::uint64_t last_check_us_ = 0;
+        int last_check_ms_ = 0;
 
         int last_stability_score_ = 0;
         int last_complexity_x100_ = 100;
@@ -238,6 +257,7 @@ class Searcher {
     static int move_index(Piece pc, Square to);
 
     bool should_stop_hard();
+    void sync_time_poll_stats();
 
     int quiet_move_score(const Position& pos, Move move, int ply) const;
     void update_history_value(int& value, int bonus) const;
@@ -269,6 +289,8 @@ class Searcher {
 
     std::uint8_t generation_ = 0;
     bool stop_ = false;
+    bool root_force_one_move_ = false;
+    int root_moves_scored_current_ = 0;
     int root_depth_ = 0;
     int root_legal_moves_ = 0;
     int seldepth_ = 0;

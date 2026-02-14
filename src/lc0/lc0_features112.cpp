@@ -2,8 +2,6 @@
 
 #include "bitboard.h"
 
-#include <vector>
-
 namespace makaira::lc0 {
 
 namespace {
@@ -15,71 +13,65 @@ void set_plane_all(InputPlanes112& out, int plane, float value) {
     }
 }
 
-void fill_plane_bb(InputPlanes112& out, int plane, Bitboard bb, float value = 1.0f) {
+void fill_plane_bb(InputPlanes112& out, int plane, Bitboard bb, bool mirror, float value = 1.0f) {
     const int base = plane * k_squares;
     while (bb) {
         const Square sq = pop_lsb(bb);
-        out[base + static_cast<int>(sq)] = value;
+        const int idx = mirror ? (static_cast<int>(sq) ^ 56) : static_cast<int>(sq);
+        out[base + idx] = value;
     }
-}
-
-std::vector<Position> reconstruct_history(const Position& pos, int plies) {
-    std::vector<Position> states;
-    states.reserve(plies);
-
-    Position cur = pos;
-    states.push_back(cur);
-
-    for (int i = 1; i < plies; ++i) {
-        if (cur.history().empty()) {
-            break;
-        }
-        cur.unmake_move();
-        states.push_back(cur);
-    }
-
-    while (static_cast<int>(states.size()) < plies) {
-        states.push_back(states.back());
-    }
-
-    return states;
 }
 
 }  // namespace
 
 InputPlanes112 extract_features_112(const Position& pos) {
     InputPlanes112 out{};
+    const Color current_stm = pos.side_to_move();
+    const bool mirror_all = current_stm == BLACK;
 
     // 8 history plies * 13 planes = 104 planes.
-    const auto states = reconstruct_history(pos, 8);
-
+    Position hist = pos;
     for (int h = 0; h < 8; ++h) {
-        const Position& s = states[h];
-        const Color ours = s.side_to_move();
+        if (h > 0) {
+            // For INPUT_CLASSICAL_112_PLANE lc0 leaves unavailable history
+            // planes empty when history cannot be reconstructed.
+            if (hist.history().empty()) {
+                break;
+            }
+            hist.unmake_move();
+        }
+
+        const Position& s = hist;
+        // lc0 Position history stores boards already transformed into the
+        // side-to-move frame at each ply. In our absolute-board representation
+        // we emulate INPUT_CLASSICAL_112_PLANE by applying the current
+        // side-to-move frame to all history slices.
+        const bool mirror = mirror_all;
+        const Color ours = current_stm;
         const Color theirs = ~ours;
 
         const int base = h * 13;
 
-        fill_plane_bb(out, base + 0, s.pieces(ours, PAWN));
-        fill_plane_bb(out, base + 1, s.pieces(ours, KNIGHT));
-        fill_plane_bb(out, base + 2, s.pieces(ours, BISHOP));
-        fill_plane_bb(out, base + 3, s.pieces(ours, ROOK));
-        fill_plane_bb(out, base + 4, s.pieces(ours, QUEEN));
-        fill_plane_bb(out, base + 5, s.pieces(ours, KING));
+        fill_plane_bb(out, base + 0, s.pieces(ours, PAWN), mirror);
+        fill_plane_bb(out, base + 1, s.pieces(ours, KNIGHT), mirror);
+        fill_plane_bb(out, base + 2, s.pieces(ours, BISHOP), mirror);
+        fill_plane_bb(out, base + 3, s.pieces(ours, ROOK), mirror);
+        fill_plane_bb(out, base + 4, s.pieces(ours, QUEEN), mirror);
+        fill_plane_bb(out, base + 5, s.pieces(ours, KING), mirror);
 
-        fill_plane_bb(out, base + 6, s.pieces(theirs, PAWN));
-        fill_plane_bb(out, base + 7, s.pieces(theirs, KNIGHT));
-        fill_plane_bb(out, base + 8, s.pieces(theirs, BISHOP));
-        fill_plane_bb(out, base + 9, s.pieces(theirs, ROOK));
-        fill_plane_bb(out, base + 10, s.pieces(theirs, QUEEN));
-        fill_plane_bb(out, base + 11, s.pieces(theirs, KING));
+        fill_plane_bb(out, base + 6, s.pieces(theirs, PAWN), mirror);
+        fill_plane_bb(out, base + 7, s.pieces(theirs, KNIGHT), mirror);
+        fill_plane_bb(out, base + 8, s.pieces(theirs, BISHOP), mirror);
+        fill_plane_bb(out, base + 9, s.pieces(theirs, ROOK), mirror);
+        fill_plane_bb(out, base + 10, s.pieces(theirs, QUEEN), mirror);
+        fill_plane_bb(out, base + 11, s.pieces(theirs, KING), mirror);
 
         if (s.is_repetition()) {
             set_plane_all(out, base + 12, 1.0f);
         }
     }
 
-    const Position& cur = states[0];
+    const Position& cur = pos;
     const Color stm = cur.side_to_move();
     const int cr = cur.castling_rights();
 

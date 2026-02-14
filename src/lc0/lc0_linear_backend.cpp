@@ -99,6 +99,7 @@ class OrtRuntime {
     const OrtApi* api_ = nullptr;
     OrtEnv* env_ = nullptr;
     OrtMemoryInfo* cpu_mem_ = nullptr;
+    OrtRunOptions* run_options_ = nullptr;
     SessionPair cpu_sessions_{};
 
 #if defined(_WIN32)
@@ -118,6 +119,9 @@ OrtRuntime::~OrtRuntime() {
     }
     if (cpu_mem_) {
         api_->ReleaseMemoryInfo(cpu_mem_);
+    }
+    if (run_options_) {
+        api_->ReleaseRunOptions(run_options_);
     }
     if (env_) {
         api_->ReleaseEnv(env_);
@@ -218,6 +222,11 @@ bool OrtRuntime::ensure_initialized(std::string& err) {
         err = init_error_;
         return false;
     }
+    st = api_->CreateRunOptions(&run_options_);
+    if (!check_status(st, "CreateRunOptions", init_error_)) {
+        err = init_error_;
+        return false;
+    }
 
     err.clear();
     return true;
@@ -298,7 +307,7 @@ bool OrtRuntime::run_gemm(const std::vector<float>& in,
         return false;
     }
 
-    out.assign(static_cast<std::size_t>(rows * out_dim), 0.0f);
+    out.resize(static_cast<std::size_t>(rows * out_dim));
 
     const int64_t x_dims[2] = {rows, in_dim};
     const int64_t w_dims[2] = {out_dim, in_dim};  // model uses transB=1
@@ -382,7 +391,7 @@ bool OrtRuntime::run_gemm(const std::vector<float>& in,
     std::array<OrtValue*, 1> outputs{y_val};
 
     st = api_->Run(session,
-                   nullptr,
+                   run_options_,
                    bias ? kInputNamesBias : kInputNamesNoBias,
                    bias ? inputs_bias.data() : inputs_nobias.data(),
                    bias ? 3u : 2u,

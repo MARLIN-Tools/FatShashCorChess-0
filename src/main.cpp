@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -223,12 +224,21 @@ bool handle_setoption(makaira::Searcher& searcher,
                       makaira::HybridEvaluator& evaluator,
                       makaira::SearchConfig& search_config,
                       int& move_overhead_ms,
+                      int& time_poll_target_us,
+                      int& time_poll_emergency_us,
+                      int& time_poll_min_nodes,
                       int& uci_threads,
                       bool& nodes_as_time,
                       bool& use_lc0_eval,
+                      int& lc0_backend,
                       std::string& lc0_weights_file,
                       int& lc0_cp_scale,
                       int& lc0_score_map,
+                      int& lc0_batch_max,
+                      int& lc0_batch_wait_us,
+                      int& lc0_eval_threads,
+                      int& lc0_cache_entries,
+                      int& lc0_exec_backend,
                       std::string& status_message,
                       const std::vector<std::string>& tokens) {
     std::string name;
@@ -292,6 +302,21 @@ bool handle_setoption(makaira::Searcher& searcher,
         return true;
     }
 
+    if (key == "timepolltargetus") {
+        time_poll_target_us = std::clamp(parse_int(value, time_poll_target_us), 50, 100000);
+        return true;
+    }
+
+    if (key == "timepollemergencyus") {
+        time_poll_emergency_us = std::clamp(parse_int(value, time_poll_emergency_us), 10, time_poll_target_us);
+        return true;
+    }
+
+    if (key == "timepollminnodes") {
+        time_poll_min_nodes = std::clamp(parse_int(value, time_poll_min_nodes), 1, 512);
+        return true;
+    }
+
     if (key == "nodesastime") {
         for (char& c : value) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -305,7 +330,18 @@ bool handle_setoption(makaira::Searcher& searcher,
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
         use_lc0_eval = parse_bool(value);
-        evaluator.set_use_lc0(false);
+        if (use_lc0_eval) {
+            // No-timeout conservative defaults for NN mode at short TC.
+            lc0_backend = 2;      // FP32 async
+            lc0_exec_backend = 4; // ORT FP32
+            lc0_batch_max = 4;
+            lc0_batch_wait_us = 200;
+            lc0_eval_threads = 1;
+            move_overhead_ms = std::max(move_overhead_ms, 100);
+        } else {
+            lc0_backend = 0;
+        }
+        evaluator.set_backend_from_int(lc0_backend);
         if (!use_lc0_eval) {
             status_message = "lc0 eval disabled";
             return true;
@@ -313,27 +349,64 @@ bool handle_setoption(makaira::Searcher& searcher,
 
         evaluator.set_lc0_cp_scale(lc0_cp_scale);
         evaluator.set_lc0_score_map(lc0_score_map);
+        evaluator.set_lc0_batch_max(lc0_batch_max);
+        evaluator.set_lc0_batch_wait_us(lc0_batch_wait_us);
+        evaluator.set_lc0_eval_threads(lc0_eval_threads);
+        evaluator.set_lc0_cache_entries(static_cast<std::size_t>(std::max(1024, lc0_cache_entries)));
+        evaluator.set_lc0_exec_backend(lc0_exec_backend);
         if (!evaluator.lc0_ready() && !evaluator.load_lc0_weights(lc0_weights_file, true)) {
             use_lc0_eval = false;
+            lc0_backend = 0;
+            evaluator.set_backend_from_int(0);
             status_message = "failed to load lc0 weights: " + evaluator.lc0_last_error();
             return true;
         }
 
-        evaluator.set_use_lc0(true);
-        status_message = "lc0 eval enabled";
+        status_message = "lc0 eval enabled backend=" + evaluator.lc0_backend_name()
+                       + " exec=" + evaluator.lc0_exec_backend_name();
+        return true;
+    }
+
+    if (key == "lc0backend") {
+        lc0_backend = std::clamp(parse_int(value, lc0_backend), 0, 3);
+        evaluator.set_backend_from_int(lc0_backend);
+        use_lc0_eval = lc0_backend != 0;
+        if (use_lc0_eval) {
+            if (!evaluator.lc0_ready() && !evaluator.load_lc0_weights(lc0_weights_file, true)) {
+                lc0_backend = 0;
+                use_lc0_eval = false;
+                evaluator.set_backend_from_int(0);
+                status_message = "failed to load lc0 weights: " + evaluator.lc0_last_error();
+                return true;
+            }
+            status_message = "lc0 backend set to " + evaluator.lc0_backend_name();
+        } else {
+            status_message = "evaluator backend set to hce";
+        }
+        return true;
+    }
+
+    if (key == "lc0execbackend") {
+        lc0_exec_backend = std::clamp(parse_int(value, lc0_exec_backend), 0, 5);
+        evaluator.set_lc0_exec_backend(lc0_exec_backend);
+        status_message = "lc0 exec backend set to " + evaluator.lc0_exec_backend_name();
+        if (!evaluator.lc0_exec_backend_error().empty()) {
+            status_message += " (" + evaluator.lc0_exec_backend_error() + ")";
+        }
         return true;
     }
 
     if (key == "lc0weightsfile") {
         lc0_weights_file = value;
         if (use_lc0_eval) {
-            evaluator.set_use_lc0(false);
+            evaluator.set_backend_from_int(0);
             if (!evaluator.load_lc0_weights(lc0_weights_file, true)) {
                 use_lc0_eval = false;
+                lc0_backend = 0;
                 status_message = "failed to load lc0 weights: " + evaluator.lc0_last_error();
                 return true;
             }
-            evaluator.set_use_lc0(true);
+            evaluator.set_backend_from_int(lc0_backend);
         }
         status_message = "lc0 weights file set";
         return true;
@@ -346,8 +419,37 @@ bool handle_setoption(makaira::Searcher& searcher,
     }
 
     if (key == "lc0scoremap") {
-        lc0_score_map = std::clamp(parse_int(value, lc0_score_map), 0, 2);
+        lc0_score_map = std::clamp(parse_int(value, lc0_score_map), 0, 3);
         evaluator.set_lc0_score_map(lc0_score_map);
+        return true;
+    }
+
+    if (key == "lc0batchmax") {
+        lc0_batch_max = std::clamp(parse_int(value, lc0_batch_max), 1, 512);
+        evaluator.set_lc0_batch_max(lc0_batch_max);
+        return true;
+    }
+
+    if (key == "lc0batchwaitus") {
+        lc0_batch_wait_us = std::clamp(parse_int(value, lc0_batch_wait_us), 0, 20000);
+        evaluator.set_lc0_batch_wait_us(lc0_batch_wait_us);
+        return true;
+    }
+
+    if (key == "lc0evalthreads") {
+        lc0_eval_threads = std::clamp(parse_int(value, lc0_eval_threads), 1, 64);
+        evaluator.set_lc0_eval_threads(lc0_eval_threads);
+        return true;
+    }
+
+    if (key == "lc0cacheentries") {
+        lc0_cache_entries = std::clamp(parse_int(value, lc0_cache_entries), 1024, 1 << 24);
+        evaluator.set_lc0_cache_entries(static_cast<std::size_t>(lc0_cache_entries));
+        return true;
+    }
+
+    if (key == "lc0quantmode" || key == "lc0intrathreads" || key == "lc0interthreads" || key == "lc0policymode") {
+        // Accepted for compatibility with the NN acceleration roadmap.
         return true;
     }
 
@@ -483,6 +585,8 @@ bool handle_setoption(makaira::Searcher& searcher,
 }  // namespace
 
 int main(int argc, char** argv) {
+    std::cout.setf(std::ios::unitbuf);
+
     makaira::attacks::init();
     makaira::init_zobrist();
 
@@ -491,12 +595,30 @@ int main(int argc, char** argv) {
     makaira::SearchConfig search_config{};
     searcher.set_search_config(search_config);
     int move_overhead_ms = 30;
+    int time_poll_target_us = 1000;
+    int time_poll_emergency_us = 250;
+    int time_poll_min_nodes = 8;
     int uci_threads = 1;
     bool nodes_as_time = false;
     bool use_lc0_eval = false;
+    int lc0_backend = 0;
     std::string lc0_weights_file = "t1-256x10-distilled-swa-2432500.pb.gz";
     int lc0_cp_scale = 220;
     int lc0_score_map = 1;
+    int lc0_batch_max = 4;
+    int lc0_batch_wait_us = 200;
+    int lc0_eval_threads = 1;
+    int lc0_cache_entries = 1 << 18;
+    int lc0_exec_backend = 4;
+
+    evaluator.set_lc0_cp_scale(lc0_cp_scale);
+    evaluator.set_lc0_score_map(lc0_score_map);
+    evaluator.set_lc0_batch_max(lc0_batch_max);
+    evaluator.set_lc0_batch_wait_us(lc0_batch_wait_us);
+    evaluator.set_lc0_eval_threads(lc0_eval_threads);
+    evaluator.set_lc0_cache_entries(static_cast<std::size_t>(lc0_cache_entries));
+    evaluator.set_lc0_exec_backend(lc0_exec_backend);
+    evaluator.set_backend_from_int(lc0_backend);
 
     makaira::Position position;
     if (!position.set_startpos()) {
@@ -539,11 +661,25 @@ int main(int argc, char** argv) {
             std::cout << "option name Threads type spin default " << uci_threads << " min 1 max 256\n";
             std::cout << "option name Hash type spin default 32 min 1 max 65536\n";
             std::cout << "option name MoveOverhead type spin default " << move_overhead_ms << " min 0 max 10000\n";
+            std::cout << "option name TimePollTargetUs type spin default " << time_poll_target_us << " min 50 max 100000\n";
+            std::cout << "option name TimePollEmergencyUs type spin default " << time_poll_emergency_us
+                      << " min 10 max 100000\n";
+            std::cout << "option name TimePollMinNodes type spin default " << time_poll_min_nodes << " min 1 max 512\n";
             std::cout << "option name NodesAsTime type check default " << (nodes_as_time ? "true" : "false") << "\n";
             std::cout << "option name UseLc0Eval type check default " << (use_lc0_eval ? "true" : "false") << "\n";
+            std::cout << "option name Lc0Backend type spin default " << lc0_backend << " min 0 max 3\n";
             std::cout << "option name Lc0WeightsFile type string default " << lc0_weights_file << "\n";
             std::cout << "option name Lc0CpScale type spin default " << lc0_cp_scale << " min 1 max 2000\n";
-            std::cout << "option name Lc0ScoreMap type spin default " << lc0_score_map << " min 0 max 2\n";
+            std::cout << "option name Lc0ScoreMap type spin default " << lc0_score_map << " min 0 max 3\n";
+            std::cout << "option name Lc0BatchMax type spin default " << lc0_batch_max << " min 1 max 512\n";
+            std::cout << "option name Lc0BatchWaitUs type spin default " << lc0_batch_wait_us << " min 0 max 20000\n";
+            std::cout << "option name Lc0EvalThreads type spin default " << lc0_eval_threads << " min 1 max 64\n";
+            std::cout << "option name Lc0CacheEntries type spin default " << lc0_cache_entries << " min 1024 max 16777216\n";
+            std::cout << "option name Lc0ExecBackend type spin default " << lc0_exec_backend << " min 0 max 5\n";
+            std::cout << "option name Lc0IntraThreads type spin default 1 min 1 max 64\n";
+            std::cout << "option name Lc0InterThreads type spin default 1 min 1 max 64\n";
+            std::cout << "option name Lc0QuantMode type spin default 0 min 0 max 1\n";
+            std::cout << "option name Lc0PolicyMode type spin default 0 min 0 max 1\n";
             std::cout << "option name UseHistory type check default " << (search_config.use_history ? "true" : "false") << "\n";
             std::cout << "option name UseContinuationHistory type check default "
                       << (search_config.use_cont_history ? "true" : "false") << "\n";
@@ -579,10 +715,11 @@ int main(int argc, char** argv) {
             if (use_lc0_eval && !evaluator.lc0_ready()) {
                 if (!evaluator.load_lc0_weights(lc0_weights_file, true)) {
                     use_lc0_eval = false;
-                    evaluator.set_use_lc0(false);
+                    lc0_backend = 0;
+                    evaluator.set_backend_from_int(0);
                     std::cout << "info string failed to load lc0 weights: " << evaluator.lc0_last_error() << "\n";
                 } else {
-                    evaluator.set_use_lc0(true);
+                    evaluator.set_backend_from_int(lc0_backend);
                 }
             }
             std::cout << "readyok\n";
@@ -597,12 +734,21 @@ int main(int argc, char** argv) {
                              evaluator,
                              search_config,
                              move_overhead_ms,
+                             time_poll_target_us,
+                             time_poll_emergency_us,
+                             time_poll_min_nodes,
                              uci_threads,
                              nodes_as_time,
                              use_lc0_eval,
+                             lc0_backend,
                              lc0_weights_file,
                              lc0_cp_scale,
                              lc0_score_map,
+                             lc0_batch_max,
+                             lc0_batch_wait_us,
+                             lc0_eval_threads,
+                             lc0_cache_entries,
+                             lc0_exec_backend,
                              option_status,
                              tokens);
             if (!option_status.empty()) {
@@ -623,6 +769,9 @@ int main(int argc, char** argv) {
             const auto tokens = split_tokens(line);
             auto limits = parse_go_limits(tokens);
             limits.move_overhead_ms = move_overhead_ms;
+            limits.time_poll_target_us = time_poll_target_us;
+            limits.time_poll_emergency_us = time_poll_emergency_us;
+            limits.time_poll_min_nodes = time_poll_min_nodes;
             limits.nodes_as_time = nodes_as_time;
             if (limits.depth <= 0 && limits.movetime_ms <= 0 && limits.nodes == 0
                 && limits.wtime_ms <= 0 && limits.btime_ms <= 0 && !limits.infinite) {
@@ -630,6 +779,10 @@ int main(int argc, char** argv) {
             }
 
             const auto result = searcher.search(position, limits, [](const makaira::SearchIterationInfo& info) {
+                const double hard_stop_avg_gap = info.stats.hard_stop_checks > 1
+                                                   ? static_cast<double>(info.stats.hard_stop_total_nodes_gap)
+                                                       / static_cast<double>(info.stats.hard_stop_checks - 1)
+                                                   : 0.0;
                 std::cout << "info depth " << info.depth
                           << " seldepth " << info.seldepth
                           << " ";
@@ -659,7 +812,11 @@ int main(int argc, char** argv) {
                           << " tEff=" << info.effective_optimum_ms
                           << " tMax=" << info.maximum_time_ms
                           << " stab=" << info.stability_score
-                          << " cx=" << info.complexity_x100;
+                          << " cx=" << info.complexity_x100
+                          << " hStop=" << info.stats.hard_stop_checks
+                          << " hStopAvgGap=" << hard_stop_avg_gap
+                          << " hStopMaxGap=" << info.stats.hard_stop_max_nodes_gap
+                          << " hStopMaxMsGap=" << info.stats.hard_stop_max_ms_gap;
                 if (!info.pv.empty()) {
                     std::cout << " pv " << join_pv(info.pv);
                 }
@@ -673,6 +830,9 @@ int main(int argc, char** argv) {
             makaira::SearchLimits limits;
             limits.depth = 8;
             limits.move_overhead_ms = 0;
+            limits.time_poll_target_us = time_poll_target_us;
+            limits.time_poll_emergency_us = time_poll_emergency_us;
+            limits.time_poll_min_nodes = time_poll_min_nodes;
             limits.nodes_as_time = false;
             for (std::size_t i = 1; i < tokens.size(); ++i) {
                 if (tokens[i] == "depth" && i + 1 < tokens.size()) {
@@ -694,7 +854,33 @@ int main(int argc, char** argv) {
                                    ? 0.0
                                    : (100.0 * static_cast<double>(result.stats.tt_hits))
                                        / static_cast<double>(result.stats.tt_probes);
+            const double hard_stop_avg_gap = result.stats.hard_stop_checks > 1
+                                               ? static_cast<double>(result.stats.hard_stop_total_nodes_gap)
+                                                   / static_cast<double>(result.stats.hard_stop_checks - 1)
+                                               : 0.0;
             const auto est = evaluator.stats();
+            const double nn_avg_latency_us = est.nn_eval_latency_samples > 0
+                                               ? static_cast<double>(est.nn_eval_latency_us)
+                                                   / static_cast<double>(est.nn_eval_latency_samples)
+                                               : 0.0;
+            const std::uint64_t nn_p95_est_us = [&]() -> std::uint64_t {
+                if (est.nn_eval_latency_samples == 0) {
+                    return 0;
+                }
+                const std::uint64_t target =
+                  static_cast<std::uint64_t>(std::ceil(static_cast<double>(est.nn_eval_latency_samples) * 0.95));
+                std::uint64_t acc = est.nn_eval_latency_le_250us;
+                if (acc >= target) return 250;
+                acc += est.nn_eval_latency_le_500us;
+                if (acc >= target) return 500;
+                acc += est.nn_eval_latency_le_1000us;
+                if (acc >= target) return 1000;
+                acc += est.nn_eval_latency_le_2000us;
+                if (acc >= target) return 2000;
+                acc += est.nn_eval_latency_le_5000us;
+                if (acc >= target) return 5000;
+                return est.nn_eval_latency_max_us;
+            }();
 
             std::cout << "info string benchraw depth " << result.depth
                       << " seldepth " << result.seldepth
@@ -713,9 +899,31 @@ int main(int argc, char** argv) {
                       << " lmr " << result.stats.lmr_reduced
                       << " lmr_re " << result.stats.lmr_researches
                       << " lmr_fh " << result.stats.lmr_fail_high_after_reduce
+                      << " hard_stop_checks " << result.stats.hard_stop_checks
+                      << " hard_stop_avg_nodes_gap " << hard_stop_avg_gap
+                      << " hard_stop_max_nodes_gap " << result.stats.hard_stop_max_nodes_gap
+                      << " hard_stop_max_ms_gap " << result.stats.hard_stop_max_ms_gap
+                      << " lc0_backend " << evaluator.lc0_backend_name()
+                      << " lc0_exec " << evaluator.lc0_exec_backend_name()
                       << " eval_calls " << est.eval_calls
                       << " pawn_hash_hits " << est.pawn_hash_hits
                       << " pawn_hash_misses " << est.pawn_hash_misses
+                      << " eval_cache_hits " << est.eval_cache_hits
+                      << " eval_cache_misses " << est.eval_cache_misses
+                      << " nn_batches " << est.nn_batches
+                      << " nn_batch_positions " << est.nn_batch_positions
+                      << " nn_queue_wait_us " << est.nn_queue_wait_us
+                      << " nn_infer_us " << est.nn_infer_us
+                      << " nn_eval_latency_samples " << est.nn_eval_latency_samples
+                      << " nn_eval_latency_avg_us " << nn_avg_latency_us
+                      << " nn_eval_latency_p95_est_us " << nn_p95_est_us
+                      << " nn_eval_latency_max_us " << est.nn_eval_latency_max_us
+                      << " nn_eval_latency_le_250us " << est.nn_eval_latency_le_250us
+                      << " nn_eval_latency_le_500us " << est.nn_eval_latency_le_500us
+                      << " nn_eval_latency_le_1000us " << est.nn_eval_latency_le_1000us
+                      << " nn_eval_latency_le_2000us " << est.nn_eval_latency_le_2000us
+                      << " nn_eval_latency_le_5000us " << est.nn_eval_latency_le_5000us
+                      << " nn_eval_latency_gt_5000us " << est.nn_eval_latency_gt_5000us
                       << "\n";
         } else if (line.rfind("perft", 0) == 0) {
             const auto tokens = split_tokens(line);
@@ -740,6 +948,17 @@ int main(int argc, char** argv) {
                       << " space_mg " << b.space.mg
                       << " scale " << b.endgame_scale
                       << "\n";
+            float w = 0.0f;
+            float d = 0.0f;
+            float l = 0.0f;
+            int cp = 0;
+            if (evaluator.use_lc0() && evaluator.lc0_eval_wdl(position, w, d, l, cp)) {
+                std::cout << "info string eval_wdl win " << w
+                          << " draw " << d
+                          << " loss " << l
+                          << " cp " << cp
+                          << "\n";
+            }
         } else if (line == "ponderhit") {
             // Synchronous search mode: no active ponder thread to promote.
         } else if (line == "stop") {

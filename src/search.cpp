@@ -249,6 +249,23 @@ int Searcher::TimeManager::clamp_ms(int v) {
     return std::max(1, std::min(v, TIME_INF));
 }
 
+void Searcher::TimeManager::refresh_check_period() {
+    const int normal_target_us = std::clamp(limits_.time_poll_target_us, 50, 100000);
+    const int emergency_target_us = std::clamp(limits_.time_poll_emergency_us, 10, normal_target_us);
+    const int min_nodes = std::max(1, limits_.time_poll_min_nodes);
+    const bool emergency_poll = emergency_mode_ || maximum_time_ms_ <= 3000;
+    const int target_us = emergency_poll ? emergency_target_us : normal_target_us;
+    const int max_nodes = emergency_poll ? 256 : 2048;
+
+    // Convert wall-clock target to nodes target with conservative fallback.
+    const double nodes_per_us = std::max(1e-6, nps_ema_ / 1000000.0);
+    const double raw_nodes = nodes_per_us * static_cast<double>(target_us);
+    const std::uint64_t period =
+      static_cast<std::uint64_t>(std::llround(std::max(1.0, raw_nodes)));
+
+    check_period_nodes_ = std::clamp<std::uint64_t>(period, static_cast<std::uint64_t>(min_nodes), static_cast<std::uint64_t>(max_nodes));
+}
+
 void Searcher::TimeManager::init(const SearchLimits& limits, Color us, double session_nps_ema) {
     limits_ = limits;
     us_ = us;
@@ -263,8 +280,15 @@ void Searcher::TimeManager::init(const SearchLimits& limits, Color us, double se
     emergency_mode_ = false;
 
     nps_ema_ = session_nps_ema > 1.0 ? session_nps_ema : 200000.0;
-    check_period_nodes_ = std::clamp<std::uint64_t>(static_cast<std::uint64_t>(nps_ema_ / 50.0), 512, 32768);
+    check_period_nodes_ = 1024;
     next_check_node_ = check_period_nodes_;
+    hard_stop_checks_ = 0;
+    hard_stop_total_nodes_gap_ = 0;
+    hard_stop_max_nodes_gap_ = 0;
+    hard_stop_max_ms_gap_ = 0;
+    last_check_nodes_ = 0;
+    last_check_us_ = 0;
+    last_check_ms_ = 0;
 
     soft_node_budget_ = 0;
     hard_node_budget_ = 0;
@@ -316,6 +340,9 @@ void Searcher::TimeManager::init(const SearchLimits& limits, Color us, double se
         maximum_time_ms_ = TIME_INF;
     }
 
+    refresh_check_period();
+    next_check_node_ = check_period_nodes_;
+
     effective_optimum_ms_ = optimum_time_ms_;
 
     if (nodes_as_time_ && maximum_time_ms_ < TIME_INF && nps_ema_ > 1.0) {
@@ -343,9 +370,33 @@ bool Searcher::TimeManager::should_stop_hard(std::uint64_t total_nodes,
         return false;
     }
 
-    if (total_nodes < next_check_node_) {
+    const bool emergency_poll = emergency_mode_ || maximum_time_ms_ <= 3000;
+    const int normal_target_us = std::clamp(limits_.time_poll_target_us, 50, 100000);
+    const int emergency_target_us = std::clamp(limits_.time_poll_emergency_us, 10, normal_target_us);
+    const std::uint64_t target_us = static_cast<std::uint64_t>(emergency_poll ? emergency_target_us : normal_target_us);
+    const std::uint64_t now_us = static_cast<std::uint64_t>(std::max<std::int64_t>(
+      0, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_time_).count()));
+    const bool due_by_nodes = total_nodes >= next_check_node_;
+    const bool due_by_time = hard_stop_checks_ == 0 ? now_us >= target_us : (now_us - last_check_us_) >= target_us;
+    if (!due_by_nodes && !due_by_time) {
         return false;
     }
+
+    ++hard_stop_checks_;
+    if (hard_stop_checks_ > 1) {
+        const std::uint64_t nodes_gap = total_nodes >= last_check_nodes_ ? total_nodes - last_check_nodes_ : 0;
+        hard_stop_total_nodes_gap_ += nodes_gap;
+        hard_stop_max_nodes_gap_ = std::max(hard_stop_max_nodes_gap_, nodes_gap);
+
+        const int now_ms = elapsed_ms();
+        const int delta_ms = std::max(0, now_ms - last_check_ms_);
+        hard_stop_max_ms_gap_ = std::max(hard_stop_max_ms_gap_, static_cast<std::uint64_t>(delta_ms));
+        last_check_ms_ = now_ms;
+    } else {
+        last_check_ms_ = elapsed_ms();
+    }
+    last_check_nodes_ = total_nodes;
+    last_check_us_ = now_us;
 
     next_check_node_ = total_nodes + check_period_nodes_;
     return elapsed_ms() >= maximum_time_ms_;
@@ -451,7 +502,7 @@ void Searcher::TimeManager::update_nps(std::uint64_t nps) {
         nps_ema_ = 0.85 * nps_ema_ + 0.15 * static_cast<double>(nps);
     }
 
-    check_period_nodes_ = std::clamp<std::uint64_t>(static_cast<std::uint64_t>(nps_ema_ / 50.0), 512, 32768);
+    refresh_check_period();
 
     if (nodes_as_time_ && maximum_time_ms_ < TIME_INF) {
         soft_node_budget_ = static_cast<std::uint64_t>(std::max(1.0, (effective_optimum_ms_ * nps_ema_ * 0.90) / 1000.0));
@@ -465,8 +516,21 @@ int Searcher::TimeManager::elapsed_ms() const {
 }
 
 bool Searcher::should_stop_hard() {
-    stop_ = tm_.should_stop_hard(stats_.nodes, limits_.nodes, stop_);
-    return stop_;
+    const bool hard = tm_.should_stop_hard(stats_.nodes, limits_.nodes, stop_);
+    sync_time_poll_stats();
+    if (hard && root_force_one_move_ && root_moves_scored_current_ == 0) {
+        stop_ = false;
+        return false;
+    }
+    stop_ = hard;
+    return hard;
+}
+
+void Searcher::sync_time_poll_stats() {
+    stats_.hard_stop_checks = tm_.hard_stop_checks();
+    stats_.hard_stop_total_nodes_gap = tm_.hard_stop_total_nodes_gap();
+    stats_.hard_stop_max_nodes_gap = tm_.hard_stop_max_nodes_gap();
+    stats_.hard_stop_max_ms_gap = tm_.hard_stop_max_ms_gap();
 }
 
 void Searcher::update_pv(PVLine& dst, Move move, const PVLine& child) {
@@ -497,7 +561,10 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
     stack_[0].did_null = false;
 
     SearchResult result{};
-    result.best_move = Move{};
+    MoveList root_fallback{};
+    generate_legal(pos, root_fallback);
+    result.best_move = root_fallback.count > 0 ? root_fallback[0] : Move{};
+    root_legal_moves_ = root_fallback.count;
 
     const int max_depth = limits_.depth > 0 ? limits_.depth : 64;
 
@@ -505,6 +572,8 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
     int prev_score = 0;
 
     for (int depth = 1; depth <= max_depth; ++depth) {
+        root_force_one_move_ = (depth == 1 && result.depth == 0);
+        root_moves_scored_current_ = 0;
         if (should_stop_hard()) {
             break;
         }
@@ -527,6 +596,7 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
 
         while (true) {
             pv = {};
+            root_moves_scored_current_ = 0;
             score = search_node(pos, depth, alpha, beta, 0, true, pv);
             if (stop_) {
                 break;
@@ -549,6 +619,15 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
         }
 
         if (stop_) {
+            // Keep a partial root result when time ran out mid-iteration.
+            // This prevents falling back to depth-0 / default move behavior.
+            if (pv.length > 0) {
+                result.score = score;
+                result.depth = depth;
+                result.seldepth = seldepth_;
+                result.best_move = pv.moves[0];
+                result.pv.assign(pv.moves.begin(), pv.moves.begin() + pv.length);
+            }
             break;
         }
 
@@ -560,7 +639,6 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
             result.best_move = pv.moves[0];
             result.pv.assign(pv.moves.begin(), pv.moves.begin() + pv.length);
         } else {
-            result.best_move = Move{};
             result.pv.clear();
         }
 
@@ -624,7 +702,11 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
         }
     }
 
+    root_force_one_move_ = false;
+    root_moves_scored_current_ = 0;
+
     result.time_ms = tm_.elapsed_ms();
+    sync_time_poll_stats();
     result.stats = stats_;
 
     if (result.time_ms > 0 && stats_.nodes > 0) {
@@ -633,6 +715,14 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
             session_nps_ema_ = nps;
         } else {
             session_nps_ema_ = 0.90 * session_nps_ema_ + 0.10 * nps;
+        }
+    }
+
+    if (result.best_move.is_none()) {
+        MoveList legal{};
+        generate_legal(pos, legal);
+        if (legal.count > 0) {
+            result.best_move = legal[0];
         }
     }
 
@@ -725,6 +815,9 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
             const bool verify =
               depth >= config_.nmp_verify_min_depth || pos.non_pawn_material(us) <= config_.nmp_verify_non_pawn_max;
             if (verify) {
+                if (should_stop_hard()) {
+                    return 0;
+                }
                 ++stats_.nmp_verifications;
                 PVLine verify_pv{};
                 const int verify_score = search_node(pos, depth - 1 - r, beta - 1, beta, ply, false, verify_pv);
@@ -738,6 +831,10 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
                 return null_score;
             }
         }
+    }
+
+    if (should_stop_hard()) {
+        return 0;
     }
 
     QuietOrderContext quiet_ctx{};
@@ -781,6 +878,9 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
         }
 
         ++legal_moves;
+        if (ply == 0) {
+            ++root_moves_scored_current_;
+        }
         if (is_quiet && quiet_count < static_cast<int>(quiet_tried.size())) {
             quiet_tried[quiet_count++] = move;
         }
@@ -835,6 +935,10 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
         stack_[ply + 1] = SearchStackEntry{};
         if (use_eval_move_hooks_) {
             evaluator_.on_unmake_move(pos, move);
+        }
+
+        if (ply == 0 && should_stop_hard()) {
+            return 0;
         }
 
         if (stop_) {

@@ -30,10 +30,10 @@ class HCEEvaluator final : public IEvaluator {
 
     Score evaluate_material_psqt(const Position& pos, bool use_incremental) const;
     PawnHashEntry compute_pawn_entry(const Position& pos, Key pawn_key_with_kings) const;
-    Score evaluate_piece_features(const Position& pos, const AttackInfo& ai) const;
-    Score evaluate_threats(const Position& pos, const AttackInfo& ai) const;
+    Score evaluate_piece_features(const Position& pos, const AttackInfo& ai, EvalBreakdown* out) const;
+    Score evaluate_threats(const Position& pos, const AttackInfo& ai, EvalBreakdown* out) const;
     Score evaluate_space(const Position& pos, const AttackInfo& ai) const;
-    Score evaluate_endgame_terms(const Position& pos) const;
+    Score evaluate_endgame_terms(const Position& pos, EvalBreakdown* out) const;
     int evaluate_endgame_scale(const Position& pos, int blended_white_pov) const;
 
     AttackInfo build_attack_info(const Position& pos) const;

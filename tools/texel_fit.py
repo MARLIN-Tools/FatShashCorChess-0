@@ -12,7 +12,7 @@ def sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
-def load_dataset(path: Path):
+def load_dataset(path: Path, mate_cp_threshold=30000):
     with path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
@@ -20,9 +20,28 @@ def load_dataset(path: Path):
     if not rows:
         raise ValueError("Empty dataset")
 
+    kept = []
+    skipped_mate = 0
+    has_eval_cp = "eval_cp" in (reader.fieldnames or [])
+    for r in rows:
+        if has_eval_cp:
+            try:
+                cp = float(r["eval_cp"])
+                if abs(cp) >= mate_cp_threshold:
+                    skipped_mate += 1
+                    continue
+            except Exception:
+                pass
+        kept.append(r)
+
+    rows = kept
+    if not rows:
+        raise ValueError("Dataset empty after mate-eval filtering")
+
     feature_cols = [c for c in reader.fieldnames if c not in {"result", "eval_cp"}]
     x = np.array([[float(r[c]) for c in feature_cols] for r in rows], dtype=np.float64)
     y = np.array([float(r["result"]) for r in rows], dtype=np.float64)
+    print(f"rows_kept={len(rows)} rows_skipped_mate={skipped_mate}")
 
     # 0/0.5/1 labels are mapped to 0..1 target probabilities.
     return x, y, feature_cols
@@ -102,15 +121,16 @@ def build_scale_map(feature_cols, weights):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Fit Makaira eval component scales with logistic regression")
-    ap.add_argument("dataset", type=Path, help="CSV from makaira_eval_extract")
+    ap = argparse.ArgumentParser(description="Fit FatShashCorChess 0 eval component scales with logistic regression")
+    ap.add_argument("dataset", type=Path, help="CSV from fatshashcorchess0_eval_extract")
     ap.add_argument("--out", type=Path, default=Path("tools/texel_weights.json"))
     ap.add_argument("--lr", type=float, default=0.001)
     ap.add_argument("--l2", type=float, default=1e-6)
     ap.add_argument("--epochs", type=int, default=3000)
+    ap.add_argument("--mate-cp-threshold", type=float, default=30000.0)
     args = ap.parse_args()
 
-    x, y, feature_cols = load_dataset(args.dataset)
+    x, y, feature_cols = load_dataset(args.dataset, mate_cp_threshold=args.mate_cp_threshold)
     # Standardize for stable optimization.
     mean = x.mean(axis=0)
     std = x.std(axis=0)
