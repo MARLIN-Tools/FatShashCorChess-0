@@ -52,6 +52,14 @@ class HybridEvaluator final : public IEvaluator {
     int lc0_exec_backend() const { return lc0_.exec_backend(); }
     std::string lc0_exec_backend_name() const { return lc0_.exec_backend_name(); }
     const std::string& lc0_exec_backend_error() const { return lc0_.exec_backend_error(); }
+    void set_lc0_backend_strict(bool strict) { lc0_.set_backend_strict(strict); }
+    bool lc0_backend_strict() const { return lc0_.backend_strict(); }
+    void set_lc0_batch_policy_from_int(int policy) { lc0_.set_batch_policy_from_int(policy); }
+    int lc0_batch_policy() const { return lc0_.batch_policy_as_int(); }
+    void set_lc0_root_priority(bool enabled) { lc0_.set_root_priority(enabled); }
+    bool lc0_root_priority() const { return lc0_.root_priority(); }
+    void set_lc0_cache_policy_from_int(int policy) { lc0_.set_cache_policy_from_int(policy); }
+    int lc0_cache_policy() const { return lc0_.cache_policy_as_int(); }
     bool lc0_eval_wdl(const Position& pos, float& w, float& d, float& l, int& cp) const {
         return lc0_.eval_wdl(pos, w, d, l, cp);
     }

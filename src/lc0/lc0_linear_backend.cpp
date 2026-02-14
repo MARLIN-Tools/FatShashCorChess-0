@@ -772,6 +772,9 @@ void LinearBackend::fc_rows_onednn(const std::vector<float>& in,
     }
 #else
     last_error_ = "oneDNN backend requested but build has no oneDNN; using scalar fallback";
+    if (strict_fallback_) {
+        fail(last_error_);
+    }
     fc_rows_scalar(in, rows, in_dim, w, b, act, name, out);
 #endif
 }
@@ -811,6 +814,9 @@ void LinearBackend::fc_rows_no_bias_onednn(const std::vector<float>& in,
     }
 #else
     last_error_ = "oneDNN backend requested but build has no oneDNN; using scalar fallback";
+    if (strict_fallback_) {
+        fail(last_error_);
+    }
     fc_rows_no_bias_scalar(in, rows, in_dim, w, act, name, out);
 #endif
 }
@@ -833,6 +839,9 @@ void LinearBackend::fc_rows_ort(const std::vector<float>& in,
     const bool ok = OrtRuntime::instance().run_gemm(in, rows, in_dim, w.values, out_dim, &b.values, out, err);
     if (!ok) {
         last_error_ = "ORT backend failure: " + err + "; using scalar fallback";
+        if (strict_fallback_) {
+            fail(last_error_);
+        }
         fc_rows_scalar(in, rows, in_dim, w, b, act, name, out);
         return;
     }
@@ -853,6 +862,9 @@ void LinearBackend::fc_rows_no_bias_ort(const std::vector<float>& in,
     const bool ok = OrtRuntime::instance().run_gemm(in, rows, in_dim, w.values, out_dim, nullptr, out, err);
     if (!ok) {
         last_error_ = "ORT backend failure: " + err + "; using scalar fallback";
+        if (strict_fallback_) {
+            fail(last_error_);
+        }
         fc_rows_no_bias_scalar(in, rows, in_dim, w, act, name, out);
         return;
     }

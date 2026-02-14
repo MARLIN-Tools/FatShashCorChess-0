@@ -23,9 +23,13 @@ int main(int argc, char** argv) {
     std::string lc0_weights = "t1-256x10-distilled-swa-2432500.pb.gz";
     int lc0_batch_max = 16;
     int lc0_batch_wait_us = 1000;
+    int lc0_batch_policy = 0;
+    int lc0_root_priority = 0;
     int lc0_eval_threads = 1;
     int lc0_cache_entries = 1 << 18;
+    int lc0_cache_policy = 1;
     int lc0_exec_backend = 0;
+    int lc0_backend_strict = 0;
 
     for (int i = 3; i < argc; ++i) {
         if (std::strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
@@ -36,12 +40,20 @@ int main(int argc, char** argv) {
             lc0_batch_max = std::max(1, std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--lc0-batch-wait-us") == 0 && i + 1 < argc) {
             lc0_batch_wait_us = std::max(0, std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--lc0-batch-policy") == 0 && i + 1 < argc) {
+            lc0_batch_policy = std::clamp(std::atoi(argv[++i]), 0, 1);
+        } else if (std::strcmp(argv[i], "--lc0-root-priority") == 0 && i + 1 < argc) {
+            lc0_root_priority = std::clamp(std::atoi(argv[++i]), 0, 1);
         } else if (std::strcmp(argv[i], "--lc0-eval-threads") == 0 && i + 1 < argc) {
             lc0_eval_threads = std::max(1, std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--lc0-cache-entries") == 0 && i + 1 < argc) {
             lc0_cache_entries = std::max(1024, std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--lc0-cache-policy") == 0 && i + 1 < argc) {
+            lc0_cache_policy = std::clamp(std::atoi(argv[++i]), 0, 1);
         } else if (std::strcmp(argv[i], "--lc0-exec-backend") == 0 && i + 1 < argc) {
             lc0_exec_backend = std::max(0, std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--lc0-backend-strict") == 0 && i + 1 < argc) {
+            lc0_backend_strict = std::clamp(std::atoi(argv[++i]), 0, 1);
         }
     }
 
@@ -49,9 +61,13 @@ int main(int argc, char** argv) {
     if (backend == "lc0_sync" || backend == "lc0_async" || backend == "lc0_int8") {
         eval.set_lc0_batch_max(lc0_batch_max);
         eval.set_lc0_batch_wait_us(lc0_batch_wait_us);
+        eval.set_lc0_batch_policy_from_int(lc0_batch_policy);
+        eval.set_lc0_root_priority(lc0_root_priority != 0);
         eval.set_lc0_eval_threads(lc0_eval_threads);
         eval.set_lc0_cache_entries(static_cast<std::size_t>(lc0_cache_entries));
+        eval.set_lc0_cache_policy_from_int(lc0_cache_policy);
         eval.set_lc0_exec_backend(lc0_exec_backend);
+        eval.set_lc0_backend_strict(lc0_backend_strict != 0);
         if (!eval.load_lc0_weights(lc0_weights, true)) {
             std::cerr << "failed to load lc0 weights: " << eval.lc0_last_error() << "\n";
             return 1;
@@ -115,6 +131,10 @@ int main(int argc, char** argv) {
     std::cout << "evals_per_sec " << evals_per_sec << "\n";
     std::cout << "backend " << backend << "\n";
     std::cout << "lc0_exec_backend " << eval.lc0_exec_backend_name() << "\n";
+    std::cout << "lc0_backend_strict " << (eval.lc0_backend_strict() ? 1 : 0) << "\n";
+    std::cout << "lc0_batch_policy " << eval.lc0_batch_policy() << "\n";
+    std::cout << "lc0_root_priority " << (eval.lc0_root_priority() ? 1 : 0) << "\n";
+    std::cout << "lc0_cache_policy " << eval.lc0_cache_policy() << "\n";
     if (!eval.lc0_exec_backend_error().empty()) {
         std::cout << "lc0_exec_backend_error " << eval.lc0_exec_backend_error() << "\n";
     }

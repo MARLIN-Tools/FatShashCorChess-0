@@ -33,6 +33,7 @@ void record_latency_stats(EvalStats& stats, std::uint64_t latency_us) {
 
 Lc0Evaluator::Lc0Evaluator() {
     eval_cache_.reserve(cache_limit_);
+    cache_order_.clear();
 }
 
 Lc0Evaluator::~Lc0Evaluator() {
@@ -118,16 +119,65 @@ bool Lc0Evaluator::probe_cache(Key key, CacheEntry& out) const {
     if (it == eval_cache_.end()) {
         return false;
     }
-    out = it->second;
+    out = it->second.entry;
+    if (cache_policy_ == CachePolicy::AGE_REPLACE) {
+        cache_order_.push_back(key);
+        compact_cache_order_if_needed_locked();
+    }
     return true;
 }
 
 void Lc0Evaluator::store_cache(Key key, const CacheEntry& entry) const {
     std::scoped_lock lock(cache_mutex_);
-    if (eval_cache_.size() >= cache_limit_) {
-        eval_cache_.clear();
+    auto it = eval_cache_.find(key);
+    if (it != eval_cache_.end()) {
+        it->second.entry = entry;
+        if (cache_policy_ == CachePolicy::AGE_REPLACE) {
+            cache_order_.push_back(key);
+            compact_cache_order_if_needed_locked();
+        }
+        return;
     }
-    eval_cache_[key] = entry;
+
+    if (eval_cache_.size() >= cache_limit_) {
+        if (cache_policy_ == CachePolicy::CLEAR_ON_FULL) {
+            eval_cache_.clear();
+            cache_order_.clear();
+        } else {
+            while (!cache_order_.empty() && eval_cache_.size() >= cache_limit_) {
+                const Key victim = cache_order_.front();
+                cache_order_.pop_front();
+                auto victim_it = eval_cache_.find(victim);
+                if (victim_it != eval_cache_.end()) {
+                    eval_cache_.erase(victim_it);
+                }
+            }
+            if (eval_cache_.size() >= cache_limit_ && !eval_cache_.empty()) {
+                eval_cache_.erase(eval_cache_.begin());
+            }
+        }
+    }
+    eval_cache_[key] = CacheSlot{entry};
+    if (cache_policy_ == CachePolicy::AGE_REPLACE) {
+        cache_order_.push_back(key);
+        compact_cache_order_if_needed_locked();
+    }
+}
+
+void Lc0Evaluator::compact_cache_order_if_needed_locked() const {
+    if (cache_policy_ != CachePolicy::AGE_REPLACE || cache_limit_ == 0) {
+        return;
+    }
+    if (cache_order_.size() <= cache_limit_ * 4) {
+        return;
+    }
+
+    std::deque<Key> compacted{};
+    compacted.clear();
+    for (const auto& kv : eval_cache_) {
+        compacted.push_back(kv.first);
+    }
+    cache_order_.swap(compacted);
 }
 
 Lc0Evaluator::CacheEntry Lc0Evaluator::evaluate_sync(Key key, const lc0::InputPlanes112& planes) const {
@@ -260,11 +310,16 @@ void Lc0Evaluator::clear_stats() {
 void Lc0Evaluator::clear_cache() const {
     std::scoped_lock lock(cache_mutex_);
     eval_cache_.clear();
+    cache_order_.clear();
 }
 
 void Lc0Evaluator::set_cache_limit(std::size_t entries) {
     cache_limit_ = std::max<std::size_t>(entries, 1024);
     std::scoped_lock lock(cache_mutex_);
+    if (cache_policy_ == CachePolicy::CLEAR_ON_FULL && eval_cache_.size() > cache_limit_) {
+        eval_cache_.clear();
+        cache_order_.clear();
+    }
     eval_cache_.reserve(cache_limit_);
 }
 
@@ -289,6 +344,34 @@ void Lc0Evaluator::set_batch_max(int batch_max) {
 
 void Lc0Evaluator::set_batch_wait_us(int batch_wait_us) {
     batch_wait_us_ = std::clamp(batch_wait_us, 0, 20000);
+}
+
+void Lc0Evaluator::set_batch_policy(BatchPolicy policy) {
+    batch_policy_ = policy;
+}
+
+void Lc0Evaluator::set_batch_policy_from_int(int policy) {
+    if (policy <= 0) {
+        set_batch_policy(BatchPolicy::LATENCY_FIRST);
+    } else {
+        set_batch_policy(BatchPolicy::THROUGHPUT_FIRST);
+    }
+}
+
+void Lc0Evaluator::set_cache_policy(CachePolicy policy) {
+    cache_policy_ = policy;
+    if (cache_policy_ == CachePolicy::CLEAR_ON_FULL) {
+        std::scoped_lock lock(cache_mutex_);
+        cache_order_.clear();
+    }
+}
+
+void Lc0Evaluator::set_cache_policy_from_int(int policy) {
+    if (policy <= 0) {
+        set_cache_policy(CachePolicy::CLEAR_ON_FULL);
+    } else {
+        set_cache_policy(CachePolicy::AGE_REPLACE);
+    }
 }
 
 void Lc0Evaluator::set_eval_threads(int threads) {
@@ -369,15 +452,18 @@ void Lc0Evaluator::worker_loop() {
             queue_.pop_front();
             batch.push_back(std::move(first));
 
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(batch_wait_us_);
+            const int effective_wait_us = root_priority_ ? std::min(batch_wait_us_, 100) : batch_wait_us_;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(effective_wait_us);
             const auto oldest_enqueued = batch.front()->enqueued;
-            const auto soft_flush_threshold = std::chrono::microseconds(std::max(1, batch_wait_us_));
+            const int flush_scale = batch_policy_ == BatchPolicy::THROUGHPUT_FIRST ? 3 : 1;
+            const auto soft_flush_threshold =
+              std::chrono::microseconds(std::max(1, effective_wait_us * flush_scale));
             while (batch.size() < static_cast<std::size_t>(batch_max_)) {
                 if (std::chrono::steady_clock::now() - oldest_enqueued >= soft_flush_threshold) {
                     break;
                 }
                 if (queue_.empty()) {
-                    if (batch_wait_us_ == 0) {
+                    if (effective_wait_us == 0) {
                         break;
                     }
                     if (queue_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {

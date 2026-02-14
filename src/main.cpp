@@ -239,6 +239,10 @@ bool handle_setoption(makaira::Searcher& searcher,
                       int& lc0_eval_threads,
                       int& lc0_cache_entries,
                       int& lc0_exec_backend,
+                      bool& lc0_backend_strict,
+                      int& lc0_batch_policy,
+                      bool& lc0_root_priority,
+                      int& lc0_cache_policy,
                       std::string& status_message,
                       const std::vector<std::string>& tokens) {
     std::string name;
@@ -336,6 +340,9 @@ bool handle_setoption(makaira::Searcher& searcher,
             lc0_exec_backend = 4; // ORT FP32
             lc0_batch_max = 4;
             lc0_batch_wait_us = 200;
+            lc0_batch_policy = 0;  // latency-first
+            lc0_root_priority = false;
+            lc0_cache_policy = 1;  // age-replace
             lc0_eval_threads = 1;
             move_overhead_ms = std::max(move_overhead_ms, 100);
         } else {
@@ -354,6 +361,10 @@ bool handle_setoption(makaira::Searcher& searcher,
         evaluator.set_lc0_eval_threads(lc0_eval_threads);
         evaluator.set_lc0_cache_entries(static_cast<std::size_t>(std::max(1024, lc0_cache_entries)));
         evaluator.set_lc0_exec_backend(lc0_exec_backend);
+        evaluator.set_lc0_backend_strict(lc0_backend_strict);
+        evaluator.set_lc0_batch_policy_from_int(lc0_batch_policy);
+        evaluator.set_lc0_root_priority(lc0_root_priority);
+        evaluator.set_lc0_cache_policy_from_int(lc0_cache_policy);
         if (!evaluator.lc0_ready() && !evaluator.load_lc0_weights(lc0_weights_file, true)) {
             use_lc0_eval = false;
             lc0_backend = 0;
@@ -393,6 +404,15 @@ bool handle_setoption(makaira::Searcher& searcher,
         if (!evaluator.lc0_exec_backend_error().empty()) {
             status_message += " (" + evaluator.lc0_exec_backend_error() + ")";
         }
+        return true;
+    }
+
+    if (key == "lc0backendstrict") {
+        for (char& c : value) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        lc0_backend_strict = parse_bool(value);
+        evaluator.set_lc0_backend_strict(lc0_backend_strict);
         return true;
     }
 
@@ -436,6 +456,21 @@ bool handle_setoption(makaira::Searcher& searcher,
         return true;
     }
 
+    if (key == "lc0batchpolicy") {
+        lc0_batch_policy = std::clamp(parse_int(value, lc0_batch_policy), 0, 1);
+        evaluator.set_lc0_batch_policy_from_int(lc0_batch_policy);
+        return true;
+    }
+
+    if (key == "lc0rootpriority") {
+        for (char& c : value) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        lc0_root_priority = parse_bool(value);
+        evaluator.set_lc0_root_priority(lc0_root_priority);
+        return true;
+    }
+
     if (key == "lc0evalthreads") {
         lc0_eval_threads = std::clamp(parse_int(value, lc0_eval_threads), 1, 64);
         evaluator.set_lc0_eval_threads(lc0_eval_threads);
@@ -445,6 +480,12 @@ bool handle_setoption(makaira::Searcher& searcher,
     if (key == "lc0cacheentries") {
         lc0_cache_entries = std::clamp(parse_int(value, lc0_cache_entries), 1024, 1 << 24);
         evaluator.set_lc0_cache_entries(static_cast<std::size_t>(lc0_cache_entries));
+        return true;
+    }
+
+    if (key == "lc0cachepolicy") {
+        lc0_cache_policy = std::clamp(parse_int(value, lc0_cache_policy), 0, 1);
+        evaluator.set_lc0_cache_policy_from_int(lc0_cache_policy);
         return true;
     }
 
@@ -607,17 +648,25 @@ int main(int argc, char** argv) {
     int lc0_score_map = 1;
     int lc0_batch_max = 4;
     int lc0_batch_wait_us = 200;
+    int lc0_batch_policy = 0;
+    bool lc0_root_priority = false;
     int lc0_eval_threads = 1;
     int lc0_cache_entries = 1 << 18;
+    int lc0_cache_policy = 1;
     int lc0_exec_backend = 4;
+    bool lc0_backend_strict = false;
 
     evaluator.set_lc0_cp_scale(lc0_cp_scale);
     evaluator.set_lc0_score_map(lc0_score_map);
     evaluator.set_lc0_batch_max(lc0_batch_max);
     evaluator.set_lc0_batch_wait_us(lc0_batch_wait_us);
+    evaluator.set_lc0_batch_policy_from_int(lc0_batch_policy);
+    evaluator.set_lc0_root_priority(lc0_root_priority);
     evaluator.set_lc0_eval_threads(lc0_eval_threads);
     evaluator.set_lc0_cache_entries(static_cast<std::size_t>(lc0_cache_entries));
+    evaluator.set_lc0_cache_policy_from_int(lc0_cache_policy);
     evaluator.set_lc0_exec_backend(lc0_exec_backend);
+    evaluator.set_lc0_backend_strict(lc0_backend_strict);
     evaluator.set_backend_from_int(lc0_backend);
 
     makaira::Position position;
@@ -673,9 +722,15 @@ int main(int argc, char** argv) {
             std::cout << "option name Lc0ScoreMap type spin default " << lc0_score_map << " min 0 max 3\n";
             std::cout << "option name Lc0BatchMax type spin default " << lc0_batch_max << " min 1 max 512\n";
             std::cout << "option name Lc0BatchWaitUs type spin default " << lc0_batch_wait_us << " min 0 max 20000\n";
+            std::cout << "option name Lc0BatchPolicy type spin default " << lc0_batch_policy << " min 0 max 1\n";
+            std::cout << "option name Lc0RootPriority type check default " << (lc0_root_priority ? "true" : "false")
+                      << "\n";
             std::cout << "option name Lc0EvalThreads type spin default " << lc0_eval_threads << " min 1 max 64\n";
             std::cout << "option name Lc0CacheEntries type spin default " << lc0_cache_entries << " min 1024 max 16777216\n";
+            std::cout << "option name Lc0CachePolicy type spin default " << lc0_cache_policy << " min 0 max 1\n";
             std::cout << "option name Lc0ExecBackend type spin default " << lc0_exec_backend << " min 0 max 5\n";
+            std::cout << "option name Lc0BackendStrict type check default " << (lc0_backend_strict ? "true" : "false")
+                      << "\n";
             std::cout << "option name Lc0IntraThreads type spin default 1 min 1 max 64\n";
             std::cout << "option name Lc0InterThreads type spin default 1 min 1 max 64\n";
             std::cout << "option name Lc0QuantMode type spin default 0 min 0 max 1\n";
@@ -749,6 +804,10 @@ int main(int argc, char** argv) {
                              lc0_eval_threads,
                              lc0_cache_entries,
                              lc0_exec_backend,
+                             lc0_backend_strict,
+                             lc0_batch_policy,
+                             lc0_root_priority,
+                             lc0_cache_policy,
                              option_status,
                              tokens);
             if (!option_status.empty()) {

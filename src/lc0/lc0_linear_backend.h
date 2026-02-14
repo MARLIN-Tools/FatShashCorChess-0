@@ -26,6 +26,8 @@ class LinearBackend {
     Type type() const { return type_; }
     void set_type_from_int(int type);
     int type_as_int() const { return static_cast<int>(type_); }
+    void set_strict_fallback(bool strict) { strict_fallback_ = strict; }
+    bool strict_fallback() const { return strict_fallback_; }
 
     const std::string& last_error() const { return last_error_; }
     std::string type_name() const;
@@ -138,6 +140,7 @@ class LinearBackend {
                              std::vector<float>& out);
 
     Type type_ = Type::SCALAR_FP32;
+    bool strict_fallback_ = false;
     std::string last_error_{};
     std::unordered_map<const Layer*, QuantLayer> quant_cache_{};
     std::unordered_map<const Layer*, Fp32Layer> fp32_cache_{};
