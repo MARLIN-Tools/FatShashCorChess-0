@@ -12,12 +12,18 @@ constexpr int MOVE_INDEX_NB = static_cast<int>(PIECE_NB) * static_cast<int>(SQ_N
 struct QuietOrderContext {
     const std::int16_t* history = nullptr;
     const std::int16_t* cont_history = nullptr;
+    const std::int16_t* capture_history = nullptr;
     bool use_history = false;
     bool use_cont_history = false;
+    bool use_capture_history = false;
+    bool use_see = true;
     Color side = WHITE;
     int prev1_move_index = -1;
     int prev2_move_index = -1;
     int cont_history_2ply_divisor = 2;
+    Move killer1{};
+    Move killer2{};
+    Move counter{};
 };
 
 enum class MovePickPhase : std::uint8_t {
@@ -43,7 +49,7 @@ class MovePicker {
 
     static bool better(const ScoredMove& lhs, const ScoredMove& rhs);
     Move pick_next_from_bucket(std::array<ScoredMove, 256>& bucket, int count, int& index, MovePickPhase phase, MovePickPhase* out);
-    static int capture_score(const Position& pos, Move move);
+    static int capture_score(const Position& pos, Move move, const QuietOrderContext* quiet_ctx);
     static int quiet_score(const Position& pos, Move move, const QuietOrderContext* quiet_ctx);
 
     Move tt_move_{};

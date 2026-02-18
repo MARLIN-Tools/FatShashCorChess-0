@@ -1,6 +1,7 @@
 #include "movepicker.h"
 
 #include "movegen.h"
+#include "see.h"
 
 #include <algorithm>
 #include <array>
@@ -42,7 +43,7 @@ MovePicker::MovePicker(const Position& pos, Move tt_move, bool qsearch_only, con
         }
 
         if (is_capture_or_promo) {
-            const int score = capture_score(pos, move);
+            const int score = capture_score(pos, move, quiet_ctx_);
             if (score >= 0 || move.is_promotion()) {
                 good_captures_[good_count_++] = ScoredMove{move, score};
             } else {
@@ -116,7 +117,7 @@ Move MovePicker::pick_next_from_bucket(std::array<ScoredMove, 256>& bucket, int 
     return bucket[index++].move;
 }
 
-int MovePicker::capture_score(const Position& pos, Move move) {
+int MovePicker::capture_score(const Position& pos, Move move, const QuietOrderContext* quiet_ctx) {
     Piece captured = NO_PIECE;
     if (move.is_en_passant()) {
         captured = make_piece(~pos.side_to_move(), PAWN);
@@ -127,7 +128,19 @@ int MovePicker::capture_score(const Position& pos, Move move) {
     const Piece attacker = pos.piece_on(move.from());
     const int captured_value = captured == NO_PIECE ? 0 : PIECE_ORDER_VALUE[type_of(captured)];
     const int attacker_value = attacker == NO_PIECE ? 0 : PIECE_ORDER_VALUE[type_of(attacker)];
-    return captured_value * 16 - attacker_value;
+
+    int hist = 0;
+    if (quiet_ctx && quiet_ctx->use_capture_history && quiet_ctx->capture_history && attacker != NO_PIECE && captured != NO_PIECE) {
+        const int side = static_cast<int>(pos.side_to_move());
+        const int moved_pt = static_cast<int>(type_of(attacker));
+        const int to = static_cast<int>(move.to());
+        const int cap_pt = static_cast<int>(type_of(captured));
+        const int idx = ((side * PIECE_TYPE_NB + moved_pt) * SQ_NB + to) * PIECE_TYPE_NB + cap_pt;
+        hist = quiet_ctx->capture_history[idx];
+    }
+
+    const int see_term = (quiet_ctx && quiet_ctx->use_see) ? (static_exchange_eval(pos, move) * 1024) : 0;
+    return see_term + hist + captured_value * 16 - attacker_value;
 }
 
 int MovePicker::quiet_score(const Position& pos, Move move, const QuietOrderContext* quiet_ctx) {
@@ -136,6 +149,13 @@ int MovePicker::quiet_score(const Position& pos, Move move, const QuietOrderCont
     }
 
     int score = 0;
+    if (move == quiet_ctx->killer1) {
+        score += 1000000;
+    } else if (move == quiet_ctx->killer2) {
+        score += 900000;
+    } else if (move == quiet_ctx->counter) {
+        score += 800000;
+    }
 
     if (quiet_ctx->use_history && quiet_ctx->history) {
         const int idx = (static_cast<int>(quiet_ctx->side) * SQ_NB + static_cast<int>(move.from())) * SQ_NB

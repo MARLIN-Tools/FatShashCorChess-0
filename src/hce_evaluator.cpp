@@ -7,6 +7,7 @@
 #include "zobrist.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace makaira {
@@ -72,6 +73,10 @@ void HCEEvaluator::clear_stats() {
     pawn_hash_.clear();
 }
 
+void HCEEvaluator::set_profile_mode(bool enabled) const {
+    profile_mode_ = enabled;
+}
+
 int HCEEvaluator::static_eval(const Position& pos) const {
     return evaluate(pos, true, nullptr);
 }
@@ -131,64 +136,48 @@ PawnHashEntry HCEEvaluator::compute_pawn_entry(const Position& pos, Key pawn_key
 
             const bool isolated = (our & eval_tables::ADJACENT_FILE_MASK[file]) == 0;
             if (isolated) {
-                const Score v = make_score(-eval_params::ISOLATED_PAWN_PENALTY_MG * sign_for(c),
+                e.pawn_score += make_score(-eval_params::ISOLATED_PAWN_PENALTY_MG * sign_for(c),
                                            -eval_params::ISOLATED_PAWN_PENALTY_EG * sign_for(c));
-                e.isolated_score += v;
-                e.pawn_score += v;
             }
 
             if (popcount(our & eval_tables::FILE_MASK[file]) > 1) {
-                const Score v = make_score(-eval_params::DOUBLED_PAWN_PENALTY_MG * sign_for(c),
+                e.pawn_score += make_score(-eval_params::DOUBLED_PAWN_PENALTY_MG * sign_for(c),
                                            -eval_params::DOUBLED_PAWN_PENALTY_EG * sign_for(c));
-                e.doubled_score += v;
-                e.pawn_score += v;
             }
 
             const Bitboard passed_mask = eval_tables::PASSED_MASK[c][sq];
             const bool is_passed = (enemy & passed_mask) == 0;
             if (is_passed) {
                 e.passed[c] |= sq_bb;
-                const Score passed = make_score(eval_params::PASSED_PAWN_MG[rr] * sign_for(c),
-                                                eval_params::PASSED_PAWN_EG[rr] * sign_for(c));
-                e.passed_score += passed;
-                e.pawn_score += passed;
+                e.pawn_score += make_score(eval_params::PASSED_PAWN_MG[rr] * sign_for(c),
+                                           eval_params::PASSED_PAWN_EG[rr] * sign_for(c));
 
                 if (pawn_attacks[c] & sq_bb) {
-                    const Score v = make_score(eval_params::SUPPORTED_PASSER_BONUS_MG * sign_for(c),
+                    e.pawn_score += make_score(eval_params::SUPPORTED_PASSER_BONUS_MG * sign_for(c),
                                                eval_params::SUPPORTED_PASSER_BONUS_EG * sign_for(c));
-                    e.supported_score += v;
-                    e.pawn_score += v;
                 }
 
                 if ((our & eval_tables::ADJACENT_FILE_MASK[file]) != 0) {
-                    const Score v = make_score(eval_params::CONNECTED_PASSER_BONUS_MG * sign_for(c),
+                    e.pawn_score += make_score(eval_params::CONNECTED_PASSER_BONUS_MG * sign_for(c),
                                                eval_params::CONNECTED_PASSER_BONUS_EG * sign_for(c));
-                    e.connected_score += v;
-                    e.pawn_score += v;
                 }
 
                 const bool outside = file <= FILE_B || file >= FILE_G;
                 if (outside) {
-                    const Score v = make_score(eval_params::OUTSIDE_PASSER_BONUS_MG * sign_for(c),
+                    e.pawn_score += make_score(eval_params::OUTSIDE_PASSER_BONUS_MG * sign_for(c),
                                                eval_params::OUTSIDE_PASSER_BONUS_EG * sign_for(c));
-                    e.outside_score += v;
-                    e.pawn_score += v;
                 }
 
                 const Square stop = c == WHITE ? static_cast<Square>(sq + 8) : static_cast<Square>(sq - 8);
                 if (is_ok_square(stop) && pos.piece_on(stop) != NO_PIECE) {
-                    const Score v = make_score(-eval_params::BLOCKED_PASSER_PENALTY_MG * sign_for(c),
+                    e.pawn_score += make_score(-eval_params::BLOCKED_PASSER_PENALTY_MG * sign_for(c),
                                                -eval_params::BLOCKED_PASSER_PENALTY_EG * sign_for(c));
-                    e.blocked_score += v;
-                    e.pawn_score += v;
                 }
             } else {
                 const Bitboard forward = eval_tables::FORWARD_MASK[c][sq];
                 if ((enemy & forward) == 0) {
-                    const Score v = make_score(eval_params::CANDIDATE_PAWN_BONUS_MG * sign_for(c),
+                    e.pawn_score += make_score(eval_params::CANDIDATE_PAWN_BONUS_MG * sign_for(c),
                                                eval_params::CANDIDATE_PAWN_BONUS_EG * sign_for(c));
-                    e.candidate_score += v;
-                    e.pawn_score += v;
                 }
             }
 
@@ -197,10 +186,8 @@ PawnHashEntry HCEEvaluator::compute_pawn_entry(const Position& pos, Key pawn_key
                 const bool blocked = pos.piece_on(stop) != NO_PIECE;
                 const bool no_support = (our & eval_tables::ADJACENT_FILE_MASK[file] & eval_tables::FORWARD_MASK[them][sq]) == 0;
                 if (blocked && no_support && (pawn_attacks[them] & bb_from(stop))) {
-                    const Score v = make_score(-eval_params::BACKWARD_PAWN_PENALTY_MG * sign_for(c),
+                    e.pawn_score += make_score(-eval_params::BACKWARD_PAWN_PENALTY_MG * sign_for(c),
                                                -eval_params::BACKWARD_PAWN_PENALTY_EG * sign_for(c));
-                    e.backward_score += v;
-                    e.pawn_score += v;
                 }
             }
         }
@@ -223,8 +210,7 @@ PawnHashEntry HCEEvaluator::compute_pawn_entry(const Position& pos, Key pawn_key
                 const Square psq = pop_lsb(file_pawns);
                 const int dist = c == WHITE ? static_cast<int>(rank_of(psq)) - kr : kr - static_cast<int>(rank_of(psq));
                 if (dist >= 0 && dist <= 7) {
-                    const int v = eval_params::SHELTER_PAWN_BONUS[dist];
-                    shelter += v;
+                    shelter += eval_params::SHELTER_PAWN_BONUS[dist];
                     break;
                 }
             }
@@ -234,13 +220,13 @@ PawnHashEntry HCEEvaluator::compute_pawn_entry(const Position& pos, Key pawn_key
                 const Square esq = pop_lsb(storms);
                 const int dist = c == WHITE ? kr - static_cast<int>(rank_of(esq)) : static_cast<int>(rank_of(esq)) - kr;
                 if (dist >= 0 && dist <= 7) {
-                    e.storm_penalty_mg[c] += eval_params::STORM_PAWN_PENALTY[dist];
+                    shelter -= eval_params::STORM_PAWN_PENALTY[dist];
                     break;
                 }
             }
         }
 
-        e.shelter_bonus_mg[c] = shelter;
+        e.shelter_mg[c] = shelter;
     }
 
     return e;
@@ -302,18 +288,14 @@ HCEEvaluator::AttackInfo HCEEvaluator::build_attack_info(const Position& pos) co
     return ai;
 }
 
-Score HCEEvaluator::evaluate_piece_features(const Position& pos, const AttackInfo&, EvalBreakdown* out) const {
+Score HCEEvaluator::evaluate_piece_features(const Position& pos, const AttackInfo&) const {
     Score s{};
 
     for (Color c : {WHITE, BLACK}) {
         const int sign = sign_for(c);
 
         if (popcount(pos.pieces(c, BISHOP)) >= 2) {
-            const Score v = eval_params::BISHOP_PAIR_BONUS * sign;
-            s += v;
-            if (out) {
-                out->piece_bishop_pair += v;
-            }
+            s += eval_params::BISHOP_PAIR_BONUS * sign;
         }
 
         Bitboard rooks = pos.pieces(c, ROOK);
@@ -325,26 +307,14 @@ Score HCEEvaluator::evaluate_piece_features(const Position& pos, const AttackInf
             const bool enemy_pawn = (pos.pieces(~c, PAWN) & file_mask) != 0;
 
             if (!own_pawn && !enemy_pawn) {
-                const Score v = eval_params::ROOK_OPEN_FILE_BONUS * sign;
-                s += v;
-                if (out) {
-                    out->piece_rook_file += v;
-                }
+                s += eval_params::ROOK_OPEN_FILE_BONUS * sign;
             } else if (!own_pawn && enemy_pawn) {
-                const Score v = eval_params::ROOK_SEMIOPEN_FILE_BONUS * sign;
-                s += v;
-                if (out) {
-                    out->piece_rook_file += v;
-                }
+                s += eval_params::ROOK_SEMIOPEN_FILE_BONUS * sign;
             }
 
             const int rr = rel_rank(c, sq);
             if (rr == 6) {
-                const Score v = eval_params::ROOK_ON_SEVENTH_BONUS * sign;
-                s += v;
-                if (out) {
-                    out->piece_rook_seventh += v;
-                }
+                s += eval_params::ROOK_ON_SEVENTH_BONUS * sign;
             }
         }
 
@@ -372,11 +342,7 @@ Score HCEEvaluator::evaluate_piece_features(const Position& pos, const AttackInf
             }
 
             if ((support & sq_bb) && !(enemy_attacks & sq_bb)) {
-                const Score v = eval_params::KNIGHT_OUTPOST_BONUS * sign;
-                s += v;
-                if (out) {
-                    out->piece_knight_outpost += v;
-                }
+                s += eval_params::KNIGHT_OUTPOST_BONUS * sign;
             }
         }
 
@@ -393,17 +359,13 @@ Score HCEEvaluator::evaluate_piece_features(const Position& pos, const AttackInf
                 }
             }
         }
-        const Score v = eval_params::BAD_BISHOP_PENALTY * (-sign * bad_bishop_pawns / 2);
-        s += v;
-        if (out) {
-            out->piece_bad_bishop += v;
-        }
+        s += eval_params::BAD_BISHOP_PENALTY * (-sign * bad_bishop_pawns / 2);
     }
 
     return s;
 }
 
-Score HCEEvaluator::evaluate_threats(const Position& pos, const AttackInfo& ai, EvalBreakdown* out) const {
+Score HCEEvaluator::evaluate_threats(const Position& pos, const AttackInfo& ai) const {
     Score s{};
 
     for (Color c : {WHITE, BLACK}) {
@@ -416,21 +378,13 @@ Score HCEEvaluator::evaluate_threats(const Position& pos, const AttackInfo& ai, 
             const Square sq = pop_lsb(pawn_threats);
             const Bitboard bb = bb_from(sq);
             if (!(ai.all_attacks[them] & bb)) {
-                const Score v = eval_params::THREAT_BY_PAWN_BONUS * sign;
-                s += v;
-                if (out) {
-                    out->threat_pawn += v;
-                }
+                s += eval_params::THREAT_BY_PAWN_BONUS * sign;
             }
         }
 
         Bitboard hanging = ai.all_attacks[c] & enemy_pieces & ~ai.all_attacks[them];
         int n = popcount(hanging);
-        const Score v = eval_params::HANGING_PIECE_BONUS * (sign * n);
-        s += v;
-        if (out) {
-            out->threat_hanging += v;
-        }
+        s += eval_params::HANGING_PIECE_BONUS * (sign * n);
     }
 
     return s;
@@ -453,7 +407,7 @@ Score HCEEvaluator::evaluate_space(const Position& pos, const AttackInfo& ai) co
     return s;
 }
 
-Score HCEEvaluator::evaluate_endgame_terms(const Position& pos, EvalBreakdown* out) const {
+Score HCEEvaluator::evaluate_endgame_terms(const Position& pos) const {
     Score s{};
 
     const Square wk = pos.king_square(WHITE);
@@ -462,9 +416,6 @@ Score HCEEvaluator::evaluate_endgame_terms(const Position& pos, EvalBreakdown* o
     const int w_center = king_centralization(wk);
     const int b_center = king_centralization(bk);
     s.eg += (w_center - b_center) * eval_params::KING_ACTIVITY_BONUS.eg / 8;
-    if (out) {
-        out->endgame_king_activity = s;
-    }
 
     return s;
 }
@@ -490,6 +441,8 @@ int HCEEvaluator::evaluate_endgame_scale(const Position& pos, int blended_white_
 }
 
 int HCEEvaluator::evaluate(const Position& pos, bool use_incremental, EvalBreakdown* out) const {
+    const bool do_profile = profile_mode_;
+    const auto eval_start = do_profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     ++stats_.eval_calls;
 
     EvalBreakdown b{};
@@ -500,6 +453,7 @@ int HCEEvaluator::evaluate(const Position& pos, bool use_incremental, EvalBreakd
                  ^ Zobrist.pawn_file_king[WHITE][file_of(pos.king_square(WHITE))]
                  ^ Zobrist.pawn_file_king[BLACK][file_of(pos.king_square(BLACK))];
 
+    const auto pawn_t0 = do_profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const PawnHashEntry* cached = pawn_hash_.probe(pawn_key);
     PawnHashEntry entry{};
     if (cached) {
@@ -510,116 +464,78 @@ int HCEEvaluator::evaluate(const Position& pos, bool use_incremental, EvalBreakd
         entry = compute_pawn_entry(pos, pawn_key);
         pawn_hash_.store(entry);
     }
+    if (do_profile) {
+        const auto pawn_t1 = std::chrono::steady_clock::now();
+        stats_.eval_ns_pawn += static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(pawn_t1 - pawn_t0).count());
+    }
 
-    b.pawns_passed = entry.passed_score;
-    b.pawns_isolated = entry.isolated_score;
-    b.pawns_doubled = entry.doubled_score;
-    b.pawns_backward = entry.backward_score;
-    b.pawns_candidate = entry.candidate_score;
-    b.pawns_connected = entry.connected_score;
-    b.pawns_supported = entry.supported_score;
-    b.pawns_outside = entry.outside_score;
-    b.pawns_blocked = entry.blocked_score;
+    b.pawns = entry.pawn_score;
+    b.king_safety.mg += entry.shelter_mg[WHITE] - entry.shelter_mg[BLACK];
 
-    b.pawns = b.pawns_passed + b.pawns_isolated + b.pawns_doubled + b.pawns_backward + b.pawns_candidate + b.pawns_connected
-            + b.pawns_supported + b.pawns_outside + b.pawns_blocked;
-
-    b.king_shelter.mg = entry.shelter_bonus_mg[WHITE] - entry.shelter_bonus_mg[BLACK];
-    b.king_storm.mg = -(entry.storm_penalty_mg[WHITE] - entry.storm_penalty_mg[BLACK]);
-    b.king_safety += b.king_shelter;
-    b.king_safety += b.king_storm;
-
+    const auto attack_t0 = do_profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const AttackInfo ai = build_attack_info(pos);
+    const auto attack_t1 = do_profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    if (do_profile) {
+        stats_.eval_ns_attack_maps += static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(attack_t1 - attack_t0).count());
+    }
     b.mobility = ai.mobility;
+    if (do_profile) {
+        stats_.eval_ns_mobility += static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(attack_t1 - attack_t0).count());
+    }
 
+    const auto king_t0 = do_profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     for (Color c : {WHITE, BLACK}) {
         const Color them = ~c;
         const int sign = sign_for(c);
         const int attackers = std::clamp(ai.king_attackers[c], 0, 7);
         const int base_units = ai.king_attack_units[c];
         const int np_scale = std::clamp(pos.non_pawn_material(c) / 8, 0, 128);
-        int danger = (base_units * eval_params::KING_DANGER_SCALE[attackers] * np_scale) / 256;
+        const int danger = (base_units * eval_params::KING_DANGER_SCALE[attackers] * np_scale) / 256;
+        b.king_safety.mg += sign * danger;
 
         if (pos.non_pawn_material(them) < 1200) {
-            danger -= danger / 3;
+            b.king_safety.mg -= sign * (danger / 3);
         }
-        b.king_danger.mg += sign * danger;
-        b.king_safety.mg += sign * danger;
+    }
+    if (do_profile) {
+        const auto king_t1 = std::chrono::steady_clock::now();
+        stats_.eval_ns_king += static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(king_t1 - king_t0).count());
     }
 
-    b.piece_features = evaluate_piece_features(pos, ai, &b);
-    b.threats = evaluate_threats(pos, ai, &b);
+    b.piece_features = evaluate_piece_features(pos, ai);
+
+    const auto threat_t0 = do_profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    b.threats = evaluate_threats(pos, ai);
+    if (do_profile) {
+        const auto threat_t1 = std::chrono::steady_clock::now();
+        stats_.eval_ns_threats += static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(threat_t1 - threat_t0).count());
+    }
+
+    const auto space_t0 = do_profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     b.space = evaluate_space(pos, ai);
+    if (do_profile) {
+        const auto space_t1 = std::chrono::steady_clock::now();
+        stats_.eval_ns_space += static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(space_t1 - space_t0).count());
+    }
 
     b.endgame_scale = evaluate_endgame_scale(pos, b.material_psqt.mg + b.pawns.mg);
 
     Score total{};
     total += apply_scale(
       b.material_psqt, eval_params_tuned::MATERIAL_PSQT_MG_SCALE, eval_params_tuned::MATERIAL_PSQT_EG_SCALE);
-    {
-        Score pawns_scaled{};
-        pawns_scaled += apply_scale(
-          b.pawns_passed, eval_params_tuned::PAWN_PASSED_MG_SCALE, eval_params_tuned::PAWN_PASSED_EG_SCALE);
-        pawns_scaled += apply_scale(
-          b.pawns_isolated, eval_params_tuned::PAWN_ISOLATED_MG_SCALE, eval_params_tuned::PAWN_ISOLATED_EG_SCALE);
-        pawns_scaled += apply_scale(
-          b.pawns_doubled, eval_params_tuned::PAWN_DOUBLED_MG_SCALE, eval_params_tuned::PAWN_DOUBLED_EG_SCALE);
-        pawns_scaled += apply_scale(
-          b.pawns_backward, eval_params_tuned::PAWN_BACKWARD_MG_SCALE, eval_params_tuned::PAWN_BACKWARD_EG_SCALE);
-        pawns_scaled += apply_scale(
-          b.pawns_candidate, eval_params_tuned::PAWN_CANDIDATE_MG_SCALE, eval_params_tuned::PAWN_CANDIDATE_EG_SCALE);
-        pawns_scaled += apply_scale(
-          b.pawns_connected, eval_params_tuned::PAWN_CONNECTED_MG_SCALE, eval_params_tuned::PAWN_CONNECTED_EG_SCALE);
-        pawns_scaled += apply_scale(
-          b.pawns_supported, eval_params_tuned::PAWN_SUPPORTED_MG_SCALE, eval_params_tuned::PAWN_SUPPORTED_EG_SCALE);
-        pawns_scaled += apply_scale(
-          b.pawns_outside, eval_params_tuned::PAWN_OUTSIDE_MG_SCALE, eval_params_tuned::PAWN_OUTSIDE_EG_SCALE);
-        pawns_scaled += apply_scale(
-          b.pawns_blocked, eval_params_tuned::PAWN_BLOCKED_MG_SCALE, eval_params_tuned::PAWN_BLOCKED_EG_SCALE);
-        total += apply_scale(pawns_scaled, eval_params_tuned::PAWN_MG_SCALE, eval_params_tuned::PAWN_EG_SCALE);
-    }
+    total += apply_scale(b.pawns, eval_params_tuned::PAWN_MG_SCALE, eval_params_tuned::PAWN_EG_SCALE);
     total += apply_scale(b.mobility, eval_params_tuned::MOBILITY_MG_SCALE, eval_params_tuned::MOBILITY_EG_SCALE);
-    {
-        Score king_scaled{};
-        king_scaled += apply_scale(
-          b.king_shelter, eval_params_tuned::KING_SHELTER_MG_SCALE, eval_params_tuned::KING_SHELTER_EG_SCALE);
-        king_scaled += apply_scale(
-          b.king_storm, eval_params_tuned::KING_STORM_MG_SCALE, eval_params_tuned::KING_STORM_EG_SCALE);
-        king_scaled += apply_scale(
-          b.king_danger, eval_params_tuned::KING_DANGER_MG_SCALE, eval_params_tuned::KING_DANGER_EG_SCALE);
-        total += apply_scale(king_scaled, eval_params_tuned::KING_MG_SCALE, eval_params_tuned::KING_EG_SCALE);
-    }
-    {
-        Score piece_scaled{};
-        piece_scaled += apply_scale(b.piece_bishop_pair,
-                                    eval_params_tuned::PIECE_BISHOP_PAIR_MG_SCALE,
-                                    eval_params_tuned::PIECE_BISHOP_PAIR_EG_SCALE);
-        piece_scaled += apply_scale(
-          b.piece_rook_file, eval_params_tuned::PIECE_ROOK_FILE_MG_SCALE, eval_params_tuned::PIECE_ROOK_FILE_EG_SCALE);
-        piece_scaled += apply_scale(b.piece_rook_seventh,
-                                    eval_params_tuned::PIECE_ROOK_SEVENTH_MG_SCALE,
-                                    eval_params_tuned::PIECE_ROOK_SEVENTH_EG_SCALE);
-        piece_scaled += apply_scale(b.piece_knight_outpost,
-                                    eval_params_tuned::PIECE_KNIGHT_OUTPOST_MG_SCALE,
-                                    eval_params_tuned::PIECE_KNIGHT_OUTPOST_EG_SCALE);
-        piece_scaled += apply_scale(
-          b.piece_bad_bishop, eval_params_tuned::PIECE_BAD_BISHOP_MG_SCALE, eval_params_tuned::PIECE_BAD_BISHOP_EG_SCALE);
-        total += apply_scale(piece_scaled, eval_params_tuned::PIECE_MG_SCALE, eval_params_tuned::PIECE_EG_SCALE);
-    }
-    {
-        Score threat_scaled{};
-        threat_scaled += apply_scale(
-          b.threat_hanging, eval_params_tuned::THREAT_HANGING_MG_SCALE, eval_params_tuned::THREAT_HANGING_EG_SCALE);
-        threat_scaled += apply_scale(
-          b.threat_pawn, eval_params_tuned::THREAT_PAWN_MG_SCALE, eval_params_tuned::THREAT_PAWN_EG_SCALE);
-        total += apply_scale(threat_scaled, eval_params_tuned::THREAT_MG_SCALE, eval_params_tuned::THREAT_EG_SCALE);
-    }
+    total += apply_scale(b.king_safety, eval_params_tuned::KING_MG_SCALE, eval_params_tuned::KING_EG_SCALE);
+    total += apply_scale(b.piece_features, eval_params_tuned::PIECE_MG_SCALE, eval_params_tuned::PIECE_EG_SCALE);
+    total += apply_scale(b.threats, eval_params_tuned::THREAT_MG_SCALE, eval_params_tuned::THREAT_EG_SCALE);
     total += apply_scale(b.space, eval_params_tuned::SPACE_MG_SCALE, eval_params_tuned::SPACE_EG_SCALE);
-    b.endgame_terms = evaluate_endgame_terms(pos, &b);
-    total += apply_scale(
-      b.endgame_terms,
-      eval_params_tuned::ENDGAME_KING_ACTIVITY_MG_SCALE,
-      eval_params_tuned::ENDGAME_KING_ACTIVITY_EG_SCALE);
+    total += evaluate_endgame_terms(pos);
     const int tuned_tempo = (eval_params::TEMPO_BONUS * eval_params_tuned::TEMPO_SCALE) / 100;
     const int tempo_sign = pos.side_to_move() == WHITE ? 1 : -1;
     total.mg += tuned_tempo * tempo_sign;
@@ -642,6 +558,11 @@ int HCEEvaluator::evaluate(const Position& pos, bool use_incremental, EvalBreakd
         *out = b;
     }
 
+    if (do_profile) {
+        const auto eval_end = std::chrono::steady_clock::now();
+        stats_.eval_ns_total += static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(eval_end - eval_start).count());
+    }
     return pos.side_to_move() == WHITE ? blended : -blended;
 }
 

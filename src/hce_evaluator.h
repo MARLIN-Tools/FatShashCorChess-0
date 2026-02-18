@@ -14,6 +14,7 @@ class HCEEvaluator final : public IEvaluator {
 
     EvalStats stats() const override;
     void clear_stats() override;
+    void set_profile_mode(bool enabled) const override;
 
     int static_eval_recompute(const Position& pos) const;
 
@@ -40,6 +41,7 @@ class HCEEvaluator final : public IEvaluator {
 
     mutable EvalStats stats_{};
     mutable PawnHashTable pawn_hash_;
+    mutable bool profile_mode_ = false;
 };
 
 }  // namespace makaira

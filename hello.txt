@@ -1,3 +1,0 @@
-Hello! This is FatShashCorChess 0, a chess engine! Idk why I'm writing this but I guess this could be a time capsule for later when I finish this and I can look upon this and smile.
-
-Hello future me!

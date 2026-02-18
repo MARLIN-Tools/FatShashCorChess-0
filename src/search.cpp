@@ -2,6 +2,7 @@
 
 #include "movepicker.h"
 #include "movegen.h"
+#include "see.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +24,7 @@ Searcher::Searcher(const IEvaluator& evaluator) :
     tt_.resize_mb(32);
     history_.assign(HISTORY_SIZE, 0);
     cont_history_.assign(CONT_HISTORY_SIZE, 0);
+    capture_history_.assign(CAPTURE_HISTORY_SIZE, 0);
     lmr_table_.assign((MAX_PLY + 1) * 256, 0);
     clear_heuristics();
 
@@ -51,6 +53,14 @@ void Searcher::clear_hash() {
 void Searcher::clear_heuristics() {
     std::fill(history_.begin(), history_.end(), std::int16_t{0});
     std::fill(cont_history_.begin(), cont_history_.end(), std::int16_t{0});
+    std::fill(capture_history_.begin(), capture_history_.end(), std::int16_t{0});
+    for (auto& pair : killer_moves_) {
+        pair[0] = Move{};
+        pair[1] = Move{};
+    }
+    for (auto& row : refutation_moves_) {
+        row.fill(Move{});
+    }
 }
 
 void Searcher::TranspositionTable::resize_mb(std::size_t mb) {
@@ -129,6 +139,14 @@ int Searcher::move_index(Piece pc, Square to) {
         return -1;
     }
     return static_cast<int>(pc) * SQ_NB + static_cast<int>(to);
+}
+
+int Searcher::capture_history_index(Color side, PieceType moved, Square to, PieceType captured) {
+    if (moved == NO_PIECE_TYPE || captured == NO_PIECE_TYPE || !is_ok_square(to)) {
+        return -1;
+    }
+    return (((static_cast<int>(side) * PIECE_TYPE_NB + static_cast<int>(moved)) * SQ_NB + static_cast<int>(to)) * PIECE_TYPE_NB)
+           + static_cast<int>(captured);
 }
 
 int Searcher::quiet_move_score(const Position& pos, Move move, int ply) const {
@@ -227,6 +245,58 @@ void Searcher::update_quiet_history(const Position& pos,
     }
 }
 
+void Searcher::update_capture_history(const Position& pos,
+                                      Color side,
+                                      Move best_move,
+                                      int depth,
+                                      const std::array<Move, 256>& captures_tried,
+                                      int capture_count) {
+    if (!config_.use_capture_history) {
+        return;
+    }
+    if (best_move.is_none() || (!best_move.is_capture() && !best_move.is_promotion())) {
+        return;
+    }
+
+    const int bonus = std::max(1, depth * depth * std::max(1, config_.history_bonus_scale));
+    const int malus = std::max(1, bonus / std::max(1, config_.history_malus_divisor));
+
+    auto update_capture = [&](Move m, int delta) {
+        if (m.is_none() || (!m.is_capture() && !m.is_promotion())) {
+            return;
+        }
+
+        const Piece moved_piece = pos.piece_on(m.from());
+        if (moved_piece == NO_PIECE) {
+            return;
+        }
+
+        const Piece captured_piece = m.is_en_passant() ? make_piece(~side, PAWN) : pos.piece_on(m.to());
+        if (captured_piece == NO_PIECE && !m.is_promotion()) {
+            return;
+        }
+
+        const PieceType moved_pt = type_of(moved_piece);
+        const PieceType captured_pt = captured_piece == NO_PIECE ? PAWN : type_of(captured_piece);
+        const int idx = capture_history_index(side, moved_pt, m.to(), captured_pt);
+        if (idx < 0 || idx >= static_cast<int>(capture_history_.size())) {
+            return;
+        }
+
+        int v = capture_history_[idx];
+        update_history_value(v, delta);
+        capture_history_[idx] = static_cast<std::int16_t>(v);
+    };
+
+    update_capture(best_move, bonus);
+    for (int i = 0; i < capture_count; ++i) {
+        if (captures_tried[i] == best_move) {
+            continue;
+        }
+        update_capture(captures_tried[i], -malus);
+    }
+}
+
 int Searcher::nmp_reduction(int depth) const {
     return std::clamp(config_.nmp_base_reduction + depth / std::max(1, config_.nmp_depth_divisor), 1, depth - 1);
 }
@@ -245,25 +315,117 @@ int Searcher::lmr_reduction(int depth, int move_count, int quiet_score) const {
     return std::clamp(r, 0, depth - 1);
 }
 
-int Searcher::TimeManager::clamp_ms(int v) {
-    return std::max(1, std::min(v, TIME_INF));
+bool Searcher::move_gives_check(Position& pos, Move move) {
+    if (!pos.make_move(move)) {
+        return false;
+    }
+    const bool gives_check = pos.in_check(pos.side_to_move());
+    pos.unmake_move();
+    return gives_check;
 }
 
-void Searcher::TimeManager::refresh_check_period() {
-    const int normal_target_us = std::clamp(limits_.time_poll_target_us, 50, 100000);
-    const int emergency_target_us = std::clamp(limits_.time_poll_emergency_us, 10, normal_target_us);
-    const int min_nodes = std::max(1, limits_.time_poll_min_nodes);
-    const bool emergency_poll = emergency_mode_ || maximum_time_ms_ <= 3000;
-    const int target_us = emergency_poll ? emergency_target_us : normal_target_us;
-    const int max_nodes = emergency_poll ? 256 : 2048;
+int Searcher::see(Position& pos, Move move) {
+    ++stats_.see_calls;
+    return static_exchange_eval(pos, move);
+}
 
-    // Convert wall-clock target to nodes target with conservative fallback.
-    const double nodes_per_us = std::max(1e-6, nps_ema_ / 1000000.0);
-    const double raw_nodes = nodes_per_us * static_cast<double>(target_us);
-    const std::uint64_t period =
-      static_cast<std::uint64_t>(std::llround(std::max(1.0, raw_nodes)));
+int Searcher::lmp_limit(int depth) const {
+    switch (depth) {
+        case 1: return config_.lmp_d1;
+        case 2: return config_.lmp_d2;
+        case 3: return config_.lmp_d3;
+        default: return config_.lmp_d4;
+    }
+}
 
-    check_period_nodes_ = std::clamp<std::uint64_t>(period, static_cast<std::uint64_t>(min_nodes), static_cast<std::uint64_t>(max_nodes));
+int Searcher::razor_margin(int depth) const {
+    if (depth <= 1) {
+        return config_.razor_margin_d1_cp;
+    }
+    if (depth == 2) {
+        return config_.razor_margin_d2_cp;
+    }
+    return config_.razor_margin_d3_cp;
+}
+
+bool Searcher::maybe_disable_risky_rule(const char* reason) {
+    if (config_.use_singular) {
+        config_.use_singular = false;
+        last_alarm_reason_ = std::string(reason) + ": disabled use_singular";
+        return true;
+    }
+    if (config_.use_probcut) {
+        config_.use_probcut = false;
+        last_alarm_reason_ = std::string(reason) + ": disabled use_probcut";
+        return true;
+    }
+    if (config_.use_history_pruning) {
+        config_.use_history_pruning = false;
+        last_alarm_reason_ = std::string(reason) + ": disabled use_history_pruning";
+        return true;
+    }
+    if (config_.use_lmp) {
+        config_.use_lmp = false;
+        last_alarm_reason_ = std::string(reason) + ": disabled use_lmp";
+        return true;
+    }
+    if (config_.use_futility) {
+        config_.use_futility = false;
+        last_alarm_reason_ = std::string(reason) + ": disabled use_futility";
+        return true;
+    }
+    if (config_.use_razoring) {
+        config_.use_razoring = false;
+        last_alarm_reason_ = std::string(reason) + ": disabled use_razoring";
+        return true;
+    }
+    if (config_.use_rfp) {
+        config_.use_rfp = false;
+        last_alarm_reason_ = std::string(reason) + ": disabled use_rfp";
+        return true;
+    }
+    return false;
+}
+
+void Searcher::update_search_alarms(int depth, int score, Move pv_head) {
+    const bool score_is_mate = std::abs(score) >= VALUE_MATE - MAX_PLY;
+    if (prev_iter_had_mate_ && !score_is_mate && depth > 1) {
+        ++stats_.mate_lost_events;
+    }
+    if (prev_iter_had_mate_ && score_is_mate) {
+        const int prev_dist = VALUE_MATE - std::abs(prev_iter_mate_score_);
+        const int now_dist = VALUE_MATE - std::abs(score);
+        if (std::abs(now_dist - prev_dist) > 2) {
+            ++stats_.mate_lost_events;
+        }
+    }
+
+    if (depth >= 8 && !pv_head.is_none()) {
+        if (!prev_iter_pv_head_.is_none() && prev_iter_pv_head_ != pv_head) {
+            ++pv_head_churn_run_;
+            if (pv_head_churn_run_ > 3) {
+                ++stats_.pv_instability_events;
+            }
+        } else if (pv_head_churn_run_ > 0) {
+            --pv_head_churn_run_;
+        }
+    }
+
+    if (have_prev_iter_score_) {
+        if (std::abs(prev_iter_score_) >= 600 && score == 0) {
+            ++stats_.draw_alarm_events;
+        }
+    }
+
+    prev_iter_had_mate_ = score_is_mate;
+    prev_iter_mate_score_ = score;
+    prev_iter_pv_head_ = pv_head;
+    prev_iter_score_ = score;
+    have_prev_iter_score_ = true;
+}
+
+int Searcher::TimeManager::clamp_ms(int v) {
+    return std::max(1, std::min(v, TIME_INF));
 }
 
 void Searcher::TimeManager::init(const SearchLimits& limits, Color us, double session_nps_ema) {
@@ -280,15 +442,8 @@ void Searcher::TimeManager::init(const SearchLimits& limits, Color us, double se
     emergency_mode_ = false;
 
     nps_ema_ = session_nps_ema > 1.0 ? session_nps_ema : 200000.0;
-    check_period_nodes_ = 1024;
+    check_period_nodes_ = std::clamp<std::uint64_t>(static_cast<std::uint64_t>(nps_ema_ / 50.0), 512, 32768);
     next_check_node_ = check_period_nodes_;
-    hard_stop_checks_ = 0;
-    hard_stop_total_nodes_gap_ = 0;
-    hard_stop_max_nodes_gap_ = 0;
-    hard_stop_max_ms_gap_ = 0;
-    last_check_nodes_ = 0;
-    last_check_us_ = 0;
-    last_check_ms_ = 0;
 
     soft_node_budget_ = 0;
     hard_node_budget_ = 0;
@@ -340,9 +495,6 @@ void Searcher::TimeManager::init(const SearchLimits& limits, Color us, double se
         maximum_time_ms_ = TIME_INF;
     }
 
-    refresh_check_period();
-    next_check_node_ = check_period_nodes_;
-
     effective_optimum_ms_ = optimum_time_ms_;
 
     if (nodes_as_time_ && maximum_time_ms_ < TIME_INF && nps_ema_ > 1.0) {
@@ -370,33 +522,9 @@ bool Searcher::TimeManager::should_stop_hard(std::uint64_t total_nodes,
         return false;
     }
 
-    const bool emergency_poll = emergency_mode_ || maximum_time_ms_ <= 3000;
-    const int normal_target_us = std::clamp(limits_.time_poll_target_us, 50, 100000);
-    const int emergency_target_us = std::clamp(limits_.time_poll_emergency_us, 10, normal_target_us);
-    const std::uint64_t target_us = static_cast<std::uint64_t>(emergency_poll ? emergency_target_us : normal_target_us);
-    const std::uint64_t now_us = static_cast<std::uint64_t>(std::max<std::int64_t>(
-      0, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_time_).count()));
-    const bool due_by_nodes = total_nodes >= next_check_node_;
-    const bool due_by_time = hard_stop_checks_ == 0 ? now_us >= target_us : (now_us - last_check_us_) >= target_us;
-    if (!due_by_nodes && !due_by_time) {
+    if (total_nodes < next_check_node_) {
         return false;
     }
-
-    ++hard_stop_checks_;
-    if (hard_stop_checks_ > 1) {
-        const std::uint64_t nodes_gap = total_nodes >= last_check_nodes_ ? total_nodes - last_check_nodes_ : 0;
-        hard_stop_total_nodes_gap_ += nodes_gap;
-        hard_stop_max_nodes_gap_ = std::max(hard_stop_max_nodes_gap_, nodes_gap);
-
-        const int now_ms = elapsed_ms();
-        const int delta_ms = std::max(0, now_ms - last_check_ms_);
-        hard_stop_max_ms_gap_ = std::max(hard_stop_max_ms_gap_, static_cast<std::uint64_t>(delta_ms));
-        last_check_ms_ = now_ms;
-    } else {
-        last_check_ms_ = elapsed_ms();
-    }
-    last_check_nodes_ = total_nodes;
-    last_check_us_ = now_us;
 
     next_check_node_ = total_nodes + check_period_nodes_;
     return elapsed_ms() >= maximum_time_ms_;
@@ -502,7 +630,7 @@ void Searcher::TimeManager::update_nps(std::uint64_t nps) {
         nps_ema_ = 0.85 * nps_ema_ + 0.15 * static_cast<double>(nps);
     }
 
-    refresh_check_period();
+    check_period_nodes_ = std::clamp<std::uint64_t>(static_cast<std::uint64_t>(nps_ema_ / 50.0), 512, 32768);
 
     if (nodes_as_time_ && maximum_time_ms_ < TIME_INF) {
         soft_node_budget_ = static_cast<std::uint64_t>(std::max(1.0, (effective_optimum_ms_ * nps_ema_ * 0.90) / 1000.0));
@@ -516,21 +644,8 @@ int Searcher::TimeManager::elapsed_ms() const {
 }
 
 bool Searcher::should_stop_hard() {
-    const bool hard = tm_.should_stop_hard(stats_.nodes, limits_.nodes, stop_);
-    sync_time_poll_stats();
-    if (hard && root_force_one_move_ && root_moves_scored_current_ == 0) {
-        stop_ = false;
-        return false;
-    }
-    stop_ = hard;
-    return hard;
-}
-
-void Searcher::sync_time_poll_stats() {
-    stats_.hard_stop_checks = tm_.hard_stop_checks();
-    stats_.hard_stop_total_nodes_gap = tm_.hard_stop_total_nodes_gap();
-    stats_.hard_stop_max_nodes_gap = tm_.hard_stop_max_nodes_gap();
-    stats_.hard_stop_max_ms_gap = tm_.hard_stop_max_ms_gap();
+    stop_ = tm_.should_stop_hard(stats_.nodes, limits_.nodes, stop_);
+    return stop_;
 }
 
 void Searcher::update_pv(PVLine& dst, Move move, const PVLine& child) {
@@ -549,6 +664,13 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
     root_legal_moves_ = 0;
     previous_root_best_move_ = Move{};
     rolling_bestmove_changes_ = 0;
+    prev_iter_had_mate_ = false;
+    prev_iter_mate_score_ = 0;
+    prev_iter_pv_head_ = Move{};
+    pv_head_churn_run_ = 0;
+    prev_iter_score_ = 0;
+    have_prev_iter_score_ = false;
+    last_alarm_reason_.clear();
 
     ++generation_;
 
@@ -557,14 +679,23 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
     for (auto& s : stack_) {
         s = SearchStackEntry{};
     }
+    stack_[0].move = Move{};
     stack_[0].move_index = -1;
     stack_[0].did_null = false;
+    stack_[0].extensions_used = 0;
 
     SearchResult result{};
-    MoveList root_fallback{};
-    generate_legal(pos, root_fallback);
-    result.best_move = root_fallback.count > 0 ? root_fallback[0] : Move{};
-    root_legal_moves_ = root_fallback.count;
+    result.best_move = Move{};
+
+    // Fallback root move: guarantees a legal bestmove even if hard stop
+    // is hit before any completed iteration updates result.best_move.
+    Move fallback_root_move{};
+    MoveList root_legal{};
+    generate_legal(pos, root_legal);
+    if (root_legal.count > 0) {
+        fallback_root_move = root_legal[0];
+        root_legal_moves_ = root_legal.count;
+    }
 
     const int max_depth = limits_.depth > 0 ? limits_.depth : 64;
 
@@ -572,8 +703,6 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
     int prev_score = 0;
 
     for (int depth = 1; depth <= max_depth; ++depth) {
-        root_force_one_move_ = (depth == 1 && result.depth == 0);
-        root_moves_scored_current_ = 0;
         if (should_stop_hard()) {
             break;
         }
@@ -596,7 +725,6 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
 
         while (true) {
             pv = {};
-            root_moves_scored_current_ = 0;
             score = search_node(pos, depth, alpha, beta, 0, true, pv);
             if (stop_) {
                 break;
@@ -619,15 +747,6 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
         }
 
         if (stop_) {
-            // Keep a partial root result when time ran out mid-iteration.
-            // This prevents falling back to depth-0 / default move behavior.
-            if (pv.length > 0) {
-                result.score = score;
-                result.depth = depth;
-                result.seldepth = seldepth_;
-                result.best_move = pv.moves[0];
-                result.pv.assign(pv.moves.begin(), pv.moves.begin() + pv.length);
-            }
             break;
         }
 
@@ -639,7 +758,13 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
             result.best_move = pv.moves[0];
             result.pv.assign(pv.moves.begin(), pv.moves.begin() + pv.length);
         } else {
+            result.best_move = Move{};
             result.pv.clear();
+        }
+        update_search_alarms(depth, score, result.best_move);
+        if (limits_.profile_mode
+            && (stats_.mate_lost_events > 0 || stats_.pv_instability_events > 0 || stats_.draw_alarm_events > 0)) {
+            maybe_disable_risky_rule("search_alarm");
         }
 
         const int elapsed = tm_.elapsed_ms();
@@ -702,11 +827,13 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
         }
     }
 
-    root_force_one_move_ = false;
-    root_moves_scored_current_ = 0;
-
     result.time_ms = tm_.elapsed_ms();
-    sync_time_poll_stats();
+    if (result.best_move.is_none() && !fallback_root_move.is_none()) {
+        result.best_move = fallback_root_move;
+        if (result.pv.empty()) {
+            result.pv.push_back(fallback_root_move);
+        }
+    }
     result.stats = stats_;
 
     if (result.time_ms > 0 && stats_.nodes > 0) {
@@ -718,14 +845,6 @@ SearchResult Searcher::search(Position& pos, const SearchLimits& limits, SearchI
         }
     }
 
-    if (result.best_move.is_none()) {
-        MoveList legal{};
-        generate_legal(pos, legal);
-        if (legal.count > 0) {
-            result.best_move = legal[0];
-        }
-    }
-
     return result;
 }
 
@@ -733,6 +852,13 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
     pv.length = 0;
     seldepth_ = std::max(seldepth_, ply);
     ++stats_.nodes;
+    if (is_pv) {
+        ++stats_.nodes_pv;
+    } else if (beta == alpha + 1) {
+        ++stats_.nodes_cut;
+    } else {
+        ++stats_.nodes_all;
+    }
 
     if (should_stop_hard()) {
         return 0;
@@ -746,6 +872,10 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
         return 0;
     }
 
+    const bool in_check = pos.in_check(pos.side_to_move());
+    if (in_check) {
+        ++depth;
+    }
     if (depth <= 0) {
         return qsearch(pos, alpha, beta, ply, pv);
     }
@@ -755,35 +885,79 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
 
     Move tt_move{};
     int tt_eval = std::numeric_limits<int>::min();
+    bool tt_hit = false;
+    int tt_depth = -1;
+    std::uint8_t tt_bound = BOUND_NONE;
+    int tt_score = 0;
 
     ++stats_.tt_probes;
     if (TTEntry* e = tt_.probe(key)) {
         ++stats_.tt_hits;
+        tt_hit = true;
+        tt_depth = e->depth;
+        tt_bound = e->bound;
         tt_move = Move(static_cast<Square>(e->move_raw & 0x3F),
                        static_cast<Square>((e->move_raw >> 6) & 0x3F),
                        static_cast<std::uint8_t>((e->move_raw >> 16) & 0xFF),
                        static_cast<PieceType>((e->move_raw >> 12) & 0x0F));
 
+        if (e->bound == BOUND_EXACT) {
+            ++stats_.hit_exact;
+        } else if (e->bound == BOUND_LOWER) {
+            ++stats_.hit_lower;
+        } else if (e->bound == BOUND_UPPER) {
+            ++stats_.hit_upper;
+        }
+
         tt_eval = e->eval;
+        tt_score = score_from_tt(e->score, ply);
         if (!is_pv && e->depth >= depth) {
-            const int tt_score = score_from_tt(e->score, ply);
             if (e->bound == BOUND_EXACT) {
+                ++stats_.tt_cutoffs;
                 return tt_score;
             }
             if (e->bound == BOUND_LOWER && tt_score >= beta) {
+                ++stats_.tt_cutoffs;
                 return tt_score;
             }
             if (e->bound == BOUND_UPPER && tt_score <= alpha) {
+                ++stats_.tt_cutoffs;
                 return tt_score;
             }
         }
     }
 
-    const bool in_check = pos.in_check(pos.side_to_move());
     const Color us = pos.side_to_move();
 
     int static_eval = tt_eval != std::numeric_limits<int>::min() ? tt_eval : evaluator_.static_eval(pos);
     stack_[ply].static_eval = static_eval;
+
+    if (config_.use_rfp
+        && depth <= config_.rfp_max_depth
+        && !is_pv
+        && !in_check
+        && std::abs(beta) < MATE_SCORE_FOR_TT) {
+        const int margin = config_.rfp_margin_base_cp + config_.rfp_margin_per_depth_cp * depth;
+        if (static_eval - margin >= beta) {
+            ++stats_.rfp_hits;
+            return static_eval;
+        }
+    }
+
+    if (config_.use_razoring
+        && depth <= config_.razor_max_depth
+        && !is_pv
+        && !in_check
+        && std::abs(alpha) < MATE_SCORE_FOR_TT) {
+        if (static_eval + razor_margin(depth) < alpha) {
+            PVLine verify{};
+            const int verify_score = qsearch(pos, alpha, alpha + 1, ply, verify);
+            if (verify_score < alpha) {
+                ++stats_.razor_hits;
+                return verify_score;
+            }
+        }
+    }
 
     if (config_.use_nmp
         && depth >= config_.nmp_min_depth
@@ -797,9 +971,11 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
 
         const int r = nmp_reduction(depth);
         pos.make_null_move();
+        stack_[ply + 1].move = Move{};
         stack_[ply + 1].move_index = -1;
         stack_[ply + 1].did_null = true;
         stack_[ply + 1].static_eval = 0;
+        stack_[ply + 1].extensions_used = stack_[ply].extensions_used;
 
         PVLine null_pv{};
         const int null_score = -search_node(pos, depth - 1 - r, -beta, -beta + 1, ply + 1, false, null_pv);
@@ -815,9 +991,6 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
             const bool verify =
               depth >= config_.nmp_verify_min_depth || pos.non_pawn_material(us) <= config_.nmp_verify_non_pawn_max;
             if (verify) {
-                if (should_stop_hard()) {
-                    return 0;
-                }
                 ++stats_.nmp_verifications;
                 PVLine verify_pv{};
                 const int verify_score = search_node(pos, depth - 1 - r, beta - 1, beta, ply, false, verify_pv);
@@ -833,19 +1006,63 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
         }
     }
 
-    if (should_stop_hard()) {
-        return 0;
+    if (config_.use_probcut
+        && depth >= config_.probcut_min_depth
+        && !is_pv
+        && !in_check
+        && std::abs(beta) < MATE_SCORE_FOR_TT) {
+        const int raised_beta = beta + config_.probcut_margin_cp;
+        MovePicker tactical(pos, Move{}, true);
+        while (true) {
+            const Move tmove = tactical.next();
+            if (tmove.is_none()) {
+                break;
+            }
+            if (config_.use_see && tmove.is_capture() && see(pos, tmove) < config_.probcut_see_threshold_cp) {
+                continue;
+            }
+            if (!pos.make_move(tmove)) {
+                continue;
+            }
+            if (use_eval_move_hooks_) {
+                evaluator_.on_make_move(pos, tmove);
+            }
+            PVLine child{};
+            const int reduced_depth = std::max(0, depth - 1 - config_.probcut_reduction);
+            const int score = -search_node(pos, reduced_depth, -raised_beta - 1, -raised_beta, ply + 1, false, child);
+            pos.unmake_move();
+            if (use_eval_move_hooks_) {
+                evaluator_.on_unmake_move(pos, tmove);
+            }
+            if (stop_) {
+                return 0;
+            }
+            if (score >= raised_beta) {
+                ++stats_.probcut_hits;
+                return beta;
+            }
+        }
     }
 
     QuietOrderContext quiet_ctx{};
     quiet_ctx.history = history_.data();
     quiet_ctx.cont_history = cont_history_.data();
+    quiet_ctx.capture_history = capture_history_.data();
     quiet_ctx.use_history = config_.use_history;
     quiet_ctx.use_cont_history = config_.use_cont_history;
+    quiet_ctx.use_capture_history = config_.use_capture_history;
+    quiet_ctx.use_see = config_.use_see;
     quiet_ctx.side = us;
     quiet_ctx.prev1_move_index = stack_[ply].move_index;
     quiet_ctx.prev2_move_index = ply > 0 ? stack_[ply - 1].move_index : -1;
     quiet_ctx.cont_history_2ply_divisor = config_.cont_history_2ply_divisor;
+    if (ply < MAX_PLY) {
+        quiet_ctx.killer1 = killer_moves_[ply][0];
+        quiet_ctx.killer2 = killer_moves_[ply][1];
+    }
+    if (ply > 0 && !stack_[ply].move.is_none()) {
+        quiet_ctx.counter = refutation_moves_[stack_[ply].move.from()][stack_[ply].move.to()];
+    }
 
     ++stats_.movegen_calls;
     MovePicker picker(pos, tt_move, false, &quiet_ctx);
@@ -855,7 +1072,10 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
     int best_score = -VALUE_INFINITE;
     Move best_move{};
     std::array<Move, 256> quiet_tried{};
+    std::array<Move, 256> captures_tried{};
     int quiet_count = 0;
+    int capture_count = 0;
+    int searched_moves = 0;
 
     while (true) {
         MovePickPhase phase = MovePickPhase::END;
@@ -867,6 +1087,40 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
         ++stats_.move_pick_iterations;
         const bool is_quiet = !move.is_capture() && !move.is_promotion();
         const int quiet_score = is_quiet ? quiet_move_score(pos, move, ply) : 0;
+
+        if (is_quiet && !is_pv && !in_check) {
+            const bool can_futility = config_.use_futility && depth <= config_.futility_max_depth;
+            const bool can_lmp = config_.use_lmp && depth <= config_.lmp_max_depth;
+            const bool can_hist = config_.use_history_pruning && depth <= config_.histprune_max_depth;
+            const bool need_check_probe = can_futility || can_lmp || can_hist;
+            const bool gives_check_for_prune = need_check_probe ? move_gives_check(pos, move) : false;
+
+            if (can_futility
+                && !gives_check_for_prune
+                && pos.non_pawn_material(us) > config_.zugzwang_non_pawn_material_cp) {
+                const int margin = config_.futility_margin_base_cp + config_.futility_margin_per_depth_cp * depth;
+                if (static_eval + margin <= alpha) {
+                    ++stats_.futility_prunes;
+                    continue;
+                }
+            }
+
+            if (can_lmp
+                && !gives_check_for_prune
+                && searched_moves >= lmp_limit(depth)) {
+                ++stats_.lmp_prunes;
+                continue;
+            }
+
+            if (can_hist
+                && !gives_check_for_prune
+                && searched_moves >= config_.histprune_min_moves
+                && quiet_score <= config_.histprune_threshold_cp) {
+                ++stats_.hist_prunes;
+                continue;
+            }
+        }
+
         const int move_idx = move_index(pos.piece_on(move.from()), move.to());
 
         if (!pos.make_move(move)) {
@@ -878,23 +1132,81 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
         }
 
         ++legal_moves;
-        if (ply == 0) {
-            ++root_moves_scored_current_;
+        if (legal_moves == 1 && phase == MovePickPhase::TT) {
+            ++stats_.tt_move_used;
         }
+        ++searched_moves;
         if (is_quiet && quiet_count < static_cast<int>(quiet_tried.size())) {
             quiet_tried[quiet_count++] = move;
+        } else if (!is_quiet && capture_count < static_cast<int>(captures_tried.size())) {
+            captures_tried[capture_count++] = move;
         }
 
+        stack_[ply + 1].move = move;
         stack_[ply + 1].move_index = move_idx;
         stack_[ply + 1].did_null = false;
         stack_[ply + 1].static_eval = 0;
+        stack_[ply + 1].extensions_used = stack_[ply].extensions_used;
 
         PVLine child_pv{};
         int score = 0;
 
-        const int next_depth = depth - 1;
-        const bool gives_check = pos.in_check(pos.side_to_move());
+        int extension = 0;
+        if (config_.use_singular
+            && config_.max_extensions_per_pv_line > 0
+            && is_pv
+            && move == tt_move
+            && tt_hit
+            && tt_depth >= depth - 1
+            && tt_bound == BOUND_LOWER
+            && depth >= config_.singular_min_depth
+            && stack_[ply].extensions_used < config_.max_extensions_per_pv_line
+            && std::abs(tt_score) < MATE_SCORE_FOR_TT) {
+            const int singular_target = tt_score - config_.singular_margin_cp;
+            bool singular = true;
+            int alternatives = 0;
+            ++stats_.movegen_calls;
+            MovePicker singular_picker(pos, Move{}, false, &quiet_ctx);
+            stats_.moves_generated += static_cast<std::uint64_t>(singular_picker.generated_count());
+            while (true) {
+                const Move alt = singular_picker.next();
+                if (alt.is_none()) {
+                    break;
+                }
+                if (alt == move) {
+                    continue;
+                }
+                if (!pos.make_move(alt)) {
+                    continue;
+                }
+                ++alternatives;
+                if (use_eval_move_hooks_) {
+                    evaluator_.on_make_move(pos, alt);
+                }
+                PVLine singular_child{};
+                const int reduced_depth = std::max(0, depth - 1 - config_.singular_reduction);
+                const int alt_score =
+                  -search_node(pos, reduced_depth, -singular_target - 1, -singular_target, ply + 1, false, singular_child);
+                pos.unmake_move();
+                if (use_eval_move_hooks_) {
+                    evaluator_.on_unmake_move(pos, alt);
+                }
+                if (stop_) {
+                    return 0;
+                }
+                if (alt_score >= singular_target) {
+                    singular = false;
+                    break;
+                }
+            }
+            if (singular && alternatives > 0) {
+                extension = 1;
+                stack_[ply + 1].extensions_used = stack_[ply].extensions_used + 1;
+            }
+        }
 
+        const int next_depth = depth - 1 + extension;
+        const bool gives_check = pos.in_check(pos.side_to_move());
         if (legal_moves == 1) {
             score = -search_node(pos, next_depth, -beta, -alpha, ply + 1, is_pv, child_pv);
         } else {
@@ -937,10 +1249,6 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
             evaluator_.on_unmake_move(pos, move);
         }
 
-        if (ply == 0 && should_stop_hard()) {
-            return 0;
-        }
-
         if (stop_) {
             return 0;
         }
@@ -958,15 +1266,42 @@ int Searcher::search_node(Position& pos, int depth, int alpha, int beta, int ply
         if (alpha >= beta) {
             ++stats_.beta_cutoffs;
             switch (phase) {
-                case MovePickPhase::TT: ++stats_.cutoff_tt; break;
-                case MovePickPhase::GOOD_CAPTURE: ++stats_.cutoff_good_capture; break;
-                case MovePickPhase::QUIET: ++stats_.cutoff_quiet; break;
-                case MovePickPhase::BAD_CAPTURE: ++stats_.cutoff_bad_capture; break;
+                case MovePickPhase::TT:
+                    ++stats_.cutoff_tt;
+                    ++stats_.fh_tt;
+                    break;
+                case MovePickPhase::GOOD_CAPTURE:
+                    ++stats_.cutoff_good_capture;
+                    ++stats_.fh_goodcap;
+                    break;
+                case MovePickPhase::QUIET:
+                    ++stats_.cutoff_quiet;
+                    ++stats_.fh_quiet;
+                    break;
+                case MovePickPhase::BAD_CAPTURE:
+                    ++stats_.cutoff_bad_capture;
+                    ++stats_.fh_badcap;
+                    break;
                 case MovePickPhase::END: break;
+            }
+            if (move.is_promotion()) {
+                ++stats_.fh_promo;
+            }
+            if (gives_check) {
+                ++stats_.fh_check;
             }
 
             if (is_quiet) {
+                if (ply < MAX_PLY && move != killer_moves_[ply][0]) {
+                    killer_moves_[ply][1] = killer_moves_[ply][0];
+                    killer_moves_[ply][0] = move;
+                }
+                if (ply > 0 && !stack_[ply].move.is_none()) {
+                    refutation_moves_[stack_[ply].move.from()][stack_[ply].move.to()] = move;
+                }
                 update_quiet_history(pos, us, move, ply, depth, quiet_tried, quiet_count);
+            } else {
+                update_capture_history(pos, us, move, depth, captures_tried, capture_count);
             }
             break;
         }
@@ -1009,17 +1344,26 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply, PVLine& pv) {
         return 0;
     }
 
-    int stand_pat = evaluator_.static_eval(pos);
-    if (stand_pat >= beta) {
-        return stand_pat;
+    const bool in_check = pos.in_check(pos.side_to_move());
+    if (in_check) {
+        ++stats_.qnodes_in_check;
     }
-    if (stand_pat > alpha) {
-        alpha = stand_pat;
+    int stand_pat = alpha;
+    if (!in_check) {
+        ++stats_.qnodes_standpat_used;
+        stand_pat = evaluator_.static_eval(pos);
+        if (stand_pat >= beta) {
+            return stand_pat;
+        }
+        if (stand_pat > alpha) {
+            alpha = stand_pat;
+        }
     }
 
     ++stats_.movegen_calls;
-    MovePicker picker(pos, Move{}, true);
+    MovePicker picker(pos, Move{}, !in_check);
     stats_.moves_generated += static_cast<std::uint64_t>(picker.generated_count());
+    int legal_moves = 0;
 
     while (true) {
         MovePickPhase phase = MovePickPhase::END;
@@ -1029,9 +1373,21 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply, PVLine& pv) {
         }
 
         ++stats_.move_pick_iterations;
+        if (!in_check && config_.use_qdelta && !move.is_promotion()) {
+            const int cap_v = see_captured_value(pos, move);
+            if (stand_pat + cap_v + config_.q_delta_margin_cp < alpha) {
+                ++stats_.q_delta_prunes;
+                continue;
+            }
+        }
+        if (!in_check && config_.use_see && move.is_capture() && see(pos, move) < config_.see_q_threshold_cp) {
+            ++stats_.see_prunes_q;
+            continue;
+        }
         if (!pos.make_move(move)) {
             continue;
         }
+        ++legal_moves;
 
         if (use_eval_move_hooks_) {
             evaluator_.on_make_move(pos, move);
@@ -1057,6 +1413,10 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply, PVLine& pv) {
             alpha = score;
             update_pv(pv, move, child);
         }
+    }
+
+    if (in_check && legal_moves == 0) {
+        return -VALUE_MATE + ply;
     }
 
     return alpha;

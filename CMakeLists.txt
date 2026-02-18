@@ -1,134 +1,34 @@
 cmake_minimum_required(VERSION 3.20)
-project(FatShashCorChess0 LANGUAGES CXX)
+project(Makaira LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(FATSHASHCORCHESS0_BUILD_TESTS "Build FatShashCorChess 0 test executables" ON)
-option(FATSHASHCORCHESS0_FETCH_ONEDNN "Auto-fetch oneDNN if not installed" OFF)
-
-find_package(ZLIB QUIET)
-find_package(dnnl QUIET CONFIG)
-if (NOT dnnl_FOUND)
-    find_package(DNNL QUIET CONFIG)
-endif()
-
-if (NOT dnnl_FOUND AND NOT DNNL_FOUND AND FATSHASHCORCHESS0_FETCH_ONEDNN)
-    include(FetchContent)
-    set(DNNL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(DNNL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(DNNL_BUILD_GRAPH OFF CACHE BOOL "" FORCE)
-    set(DNNL_LIBRARY_TYPE STATIC CACHE STRING "" FORCE)
-    FetchContent_Declare(
-        oneDNN
-        GIT_REPOSITORY https://github.com/uxlfoundation/oneDNN.git
-        GIT_TAG v3.6.2
-    )
-    FetchContent_MakeAvailable(oneDNN)
-    if (TARGET dnnl)
-        set(dnnl_FOUND ON)
-    endif()
-endif()
-
-add_library(fatshashcorchess0_core
+add_library(makaira_core
     src/bitboard.cpp
     src/evaluator.cpp
     src/eval_tables.cpp
-    src/hybrid_evaluator.cpp
     src/hce_evaluator.cpp
-    src/lc0/lc0_activation.cpp
-    src/lc0/lc0_attention_value.cpp
-    src/lc0/lc0_evaluator.cpp
-    src/lc0/lc0_features112.cpp
-    src/lc0/lc0_linear_backend.cpp
-    src/lc0/lc0_proto_wire.cpp
-    src/lc0/lc0_tables.cpp
-    src/lc0/lc0_weights.cpp
     src/pawn_hash.cpp
     src/zobrist.cpp
     src/position.cpp
     src/movegen.cpp
     src/movepicker.cpp
+    src/see.cpp
     src/perft.cpp
     src/search.cpp
 )
 
-target_include_directories(fatshashcorchess0_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(makaira_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 if (MSVC)
-    target_compile_options(fatshashcorchess0_core PRIVATE /W4 /permissive-)
+    target_compile_options(makaira_core PRIVATE /W4 /permissive-)
 else()
-    target_compile_options(fatshashcorchess0_core PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(makaira_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-if (ZLIB_FOUND)
-    target_compile_definitions(fatshashcorchess0_core PRIVATE MAKAIRA_HAS_ZLIB=1)
-    target_link_libraries(fatshashcorchess0_core PRIVATE ZLIB::ZLIB)
-else()
-    target_compile_definitions(fatshashcorchess0_core PRIVATE MAKAIRA_HAS_ZLIB=0)
-endif()
-
-if (dnnl_FOUND)
-    target_compile_definitions(fatshashcorchess0_core PRIVATE MAKAIRA_HAS_DNNL=1)
-    target_link_libraries(fatshashcorchess0_core PRIVATE dnnl)
-elseif (DNNL_FOUND)
-    target_compile_definitions(fatshashcorchess0_core PRIVATE MAKAIRA_HAS_DNNL=1)
-    target_link_libraries(fatshashcorchess0_core PRIVATE DNNL::DNNL)
-else()
-    target_compile_definitions(fatshashcorchess0_core PRIVATE MAKAIRA_HAS_DNNL=0)
-endif()
-
-target_compile_definitions(fatshashcorchess0_core PRIVATE MAKAIRA_HAS_ORT=1)
-
-add_executable(fatshashcorchess0
+add_executable(makaira
     src/main.cpp
 )
-target_link_libraries(fatshashcorchess0 PRIVATE fatshashcorchess0_core)
-
-if (FATSHASHCORCHESS0_BUILD_TESTS)
-    add_executable(fatshashcorchess0_perft_tests
-        tests/perft_tests.cpp
-    )
-    target_link_libraries(fatshashcorchess0_perft_tests PRIVATE fatshashcorchess0_core)
-
-    add_executable(fatshashcorchess0_search_tests
-        tests/search_tests.cpp
-    )
-    target_link_libraries(fatshashcorchess0_search_tests PRIVATE fatshashcorchess0_core)
-
-    add_executable(fatshashcorchess0_eval_tests
-        tests/eval_tests.cpp
-    )
-    target_link_libraries(fatshashcorchess0_eval_tests PRIVATE fatshashcorchess0_core)
-
-    add_executable(fatshashcorchess0_lc0_loader_tests
-        tests/lc0_loader_tests.cpp
-    )
-    target_link_libraries(fatshashcorchess0_lc0_loader_tests PRIVATE fatshashcorchess0_core)
-
-    add_executable(fatshashcorchess0_lc0_forward_tests
-        tests/lc0_forward_tests.cpp
-    )
-    target_link_libraries(fatshashcorchess0_lc0_forward_tests PRIVATE fatshashcorchess0_core)
-
-    add_executable(fatshashcorchess0_lc0_toggle_tests
-        tests/lc0_toggle_tests.cpp
-    )
-    target_link_libraries(fatshashcorchess0_lc0_toggle_tests PRIVATE fatshashcorchess0_core)
-endif()
-
-add_executable(fatshashcorchess0_eval_extract
-    src/eval_extract.cpp
-)
-target_link_libraries(fatshashcorchess0_eval_extract PRIVATE fatshashcorchess0_core)
-
-add_executable(fatshashcorchess0_eval_bench
-    src/eval_bench.cpp
-)
-target_link_libraries(fatshashcorchess0_eval_bench PRIVATE fatshashcorchess0_core)
-
-add_executable(fatshashcorchess0_search_bench
-    src/search_bench.cpp
-)
-target_link_libraries(fatshashcorchess0_search_bench PRIVATE fatshashcorchess0_core)
+target_link_libraries(makaira PRIVATE makaira_core)
