@@ -14,6 +14,8 @@ this transform exists to parody inflated-search-marketing behavior and explicitl
 
 the engine uses a conventional bitboard architecture with legal move generation, make and unmake state handling, zobrist hashing, transposition table support, iterative deepening, aspiration windows, principal variation search, quiescence search, and a modular evaluator interface. the evaluator is classical and hard-coded.
 
+yes, the UCI option list is absurdly long. that is mostly intentional and mostly practical: during tuning and regression work, each pruning/ordering heuristic was exposed as a knob so behavior could be toggled without recompiling. some options are also duplicated with/without spaces (for example `Use RFP` and `UseRFP`) to avoid GUI/client parsing weirdness. this is because for the vibe coding speedrun, there is no coding knowledge being used, and the LLM deemed this to be the best course of action. for normal use, you can ignore almost all of them and just set `Hash` (and maybe `Move Overhead`).
+
 to build on windows with cmake:
 
 ```powershell
