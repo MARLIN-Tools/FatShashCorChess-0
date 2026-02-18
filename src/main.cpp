@@ -371,7 +371,7 @@ int main(int argc, char** argv) {
     std::string line;
     while (std::getline(std::cin, line)) {
         if (line == "uci") {
-            std::cout << "id name Makaira\n";
+            std::cout << "id name fatshashcorchess 0\n";
             std::cout << "id author MARLIN-Tools\n";
             std::cout << "option name Hash type spin default 32 min 1 max 65536\n";
             std::cout << "option name Move Overhead type spin default 30 min 0 max 10000\n";

@@ -226,7 +226,7 @@ PawnHashEntry HCEEvaluator::compute_pawn_entry(const Position& pos, Key pawn_key
             }
         }
 
-        e.shelter_mg[c] = shelter;
+        e.shelter_bonus_mg[c] = shelter;
     }
 
     return e;
@@ -471,7 +471,7 @@ int HCEEvaluator::evaluate(const Position& pos, bool use_incremental, EvalBreakd
     }
 
     b.pawns = entry.pawn_score;
-    b.king_safety.mg += entry.shelter_mg[WHITE] - entry.shelter_mg[BLACK];
+    b.king_safety.mg += entry.shelter_bonus_mg[WHITE] - entry.shelter_bonus_mg[BLACK];
 
     const auto attack_t0 = do_profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const AttackInfo ai = build_attack_info(pos);

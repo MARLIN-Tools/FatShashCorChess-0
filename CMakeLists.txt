@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
-project(Makaira LANGUAGES CXX)
+project(FatShashCorChess0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(makaira_core
+add_library(fatshashcorchess0_core
     src/bitboard.cpp
     src/evaluator.cpp
     src/eval_tables.cpp
@@ -20,15 +20,15 @@ add_library(makaira_core
     src/search.cpp
 )
 
-target_include_directories(makaira_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(fatshashcorchess0_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 if (MSVC)
-    target_compile_options(makaira_core PRIVATE /W4 /permissive-)
+    target_compile_options(fatshashcorchess0_core PRIVATE /W4 /permissive-)
 else()
-    target_compile_options(makaira_core PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(fatshashcorchess0_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-add_executable(makaira
+add_executable(fatshashcorchess0
     src/main.cpp
 )
-target_link_libraries(makaira PRIVATE makaira_core)
+target_link_libraries(fatshashcorchess0 PRIVATE fatshashcorchess0_core)
